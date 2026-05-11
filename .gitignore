@@ -1,0 +1,8 @@
+data/*.jsonl
+data/*.pt
+data/*.npy
+data/*.npz
+data/neural_*.json
+.venv/
+__pycache__/
+*.pyc
