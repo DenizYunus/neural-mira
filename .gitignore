@@ -1,5 +1,4 @@
 data/*.jsonl
-data/*.pt
 data/*.npy
 data/*.npz
 data/baseline_report*.json
