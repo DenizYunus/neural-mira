@@ -284,3 +284,38 @@ The trained neural model and metrics are stored at:
 data/neural_htema_model.pt
 data/neural_htema_metrics.json
 ```
+
+## Baseline Evaluation
+
+Use baseline evaluation before claiming the architecture works. The default mode uses only the query text, so it does not leak generated label metadata into retrieval:
+
+```bash
+python scripts/evaluate_baselines.py --training data/generated_queries.jsonl --device auto
+```
+
+For a leakage / upper-bound diagnostic, rerun with oracle windows:
+
+```bash
+python scripts/evaluate_baselines.py --training data/generated_queries.jsonl --device auto --use-oracle-window
+```
+
+To include the trained neural Q/K/V model in the same sweep:
+
+```bash
+python scripts/evaluate_baselines.py --training data/generated_queries.jsonl --device auto --include-neural
+```
+
+First baseline readout:
+
+```text
+Query-text-only mode:
+BM25 R@1 0.280, R@5 0.472, MRR 0.373
+Scalar HTEMA R@1 0.220, R@5 0.388, MRR 0.305
+Semantic embedding R@1 0.106, R@5 0.225, MRR 0.174
+
+Oracle-window mode:
+Temporal-only R@1 0.700, R@5 0.983, MRR 0.808
+Scalar HTEMA R@1 0.781, R@5 0.934, MRR 0.851
+```
+
+Interpretation: the original high scores depended heavily on label-provided time windows. The next serious benchmark should use harder query-only splits and retrain/evaluate without oracle windows.
