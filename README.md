@@ -2,10 +2,11 @@
 
 Separate experiment for a diary-focused, Transformer-like retrieval mechanism.
 
-The lab now has two working layers:
+The lab now has three working layers:
 
 1. A lightweight deterministic / scalar HTEMA ranker that runs immediately on the local DailyBean diary files.
-2. A neural HTEMA ranker that learns Q/K/V adapters over pretrained multilingual sentence embeddings, then combines the neural score with a calibrated diary-attention prior for robust search.
+2. A leakage-free evaluation harness that compares BM25, dense semantic embeddings, scalar HTEMA, and neural MIRA from query text only.
+3. A neural MIRA ranker that learns over semantic, temporal, emotional, diary-feature, continuity, BM25, and dense semantic evidence heads.
 
 ## Idea
 
@@ -62,7 +63,7 @@ The script reads:
 
 ## Where This Fits Later
 
-This can become a Jarvis v2 memory layer:
+This can become a Jarvis memory layer:
 
 1. Keep Qdrant for vector search.
 2. Add temporal and emotional payload fields to each chunk.
@@ -131,7 +132,9 @@ Evaluate:
 python3 scripts/evaluate_htema.py --training data/generated_queries.jsonl --model data/htema_model.json
 ```
 
-Current v1 run:
+Important: `train_htema.py`, `evaluate_htema.py`, and the neural adapter scripts now run in query-text-only mode by default. The old `positive_window` behavior is available only with `--oracle-window` and should be treated as a diagnostic, not a real retrieval metric.
+
+Legacy oracle-window diagnostic:
 
 ```text
 Diary day tokens: 350
@@ -142,6 +145,8 @@ Full generated-set recall@5: 0.933
 Full generated-set MRR: 0.851
 ```
 
+Those numbers are useful only for proving that temporal/emotional labels contain signal. They are not honest query-only retrieval results.
+
 The trained model is stored at:
 
 ```text
@@ -149,6 +154,72 @@ data/htema_model.json
 ```
 
 Generated JSONL data is ignored by git because it contains private diary-derived examples.
+
+## Honest Neural MIRA Evaluation
+
+The main current evaluator is:
+
+```bash
+python scripts/honest_mira.py --split all --epochs 35
+```
+
+It generates a deterministic diary-native benchmark from the local day tokens, then evaluates:
+
+- `bm25`: Okapi BM25 over diary day text
+- `semantic_embed`: dense LSA/SVD semantic embeddings over TF-IDF text
+- `scalar_htema`: fixed transparent HTEMA prior
+- `neural_mira`: PyTorch ranker over HTEMA heads plus BM25 and dense semantic evidence
+
+Rules:
+
+- Query text is the only retrieval input.
+- `positive_window` is not used.
+- Target dates are labels only.
+- Random, month-holdout, and query-style-holdout splits are all reported.
+
+Current honest run:
+
+```text
+Split: random
+BM25              R@1 0.386   R@5 0.457   MRR 0.432
+Semantic embed    R@1 0.146   R@5 0.269   MRR 0.215
+Scalar HTEMA      R@1 0.582   R@5 0.778   MRR 0.674
+Neural MIRA       R@1 0.595   R@5 0.825   MRR 0.697
+
+Split: month_holdout
+BM25              R@1 0.381   R@5 0.466   MRR 0.435
+Semantic embed    R@1 0.161   R@5 0.302   MRR 0.239
+Scalar HTEMA      R@1 0.563   R@5 0.780   MRR 0.662
+Neural MIRA       R@1 0.607   R@5 0.868   MRR 0.716
+
+Split: style_holdout
+BM25              R@1 0.060   R@5 0.173   MRR 0.132
+Semantic embed    R@1 0.042   R@5 0.147   MRR 0.108
+Scalar HTEMA      R@1 0.266   R@5 0.665   MRR 0.443
+Neural MIRA       R@1 0.320   R@5 0.706   MRR 0.491
+```
+
+The generated aggregate report is stored at:
+
+```text
+docs/honest_evaluation_report.md
+```
+
+The trained neural MIRA artifact is ignored by git because it is diary-derived:
+
+```text
+data/neural_mira_model.pt
+data/neural_mira_metrics.json
+```
+
+Search with the trained neural MIRA ranker:
+
+```bash
+python scripts/search_mira.py "happiest days at the end of 2024" --limit 8
+python scripts/search_mira.py "sad and anxious days in May 2025" --limit 8 --json
+```
+
+For date-bound questions, `search_mira.py` applies a temporal candidate filter by default. Pass `--include-out-of-window` when you explicitly want emotionally/semantically similar memories outside the parsed date window.
 
 ## Neural Q/K/V HTEMA
 
@@ -194,7 +265,7 @@ Evaluate the final neural model:
 python scripts/evaluate_neural_htema.py --training data/generated_queries.jsonl --device auto
 ```
 
-Current neural run:
+Legacy neural oracle-window diagnostic:
 
 ```text
 Diary day tokens: 350
@@ -204,6 +275,8 @@ Full generated-set recall@1: 0.999
 Full generated-set recall@5: 1.000
 Full generated-set MRR: 0.999
 ```
+
+Those numbers were inflated by generated labels and should not be used as the main claim. Use `scripts/honest_mira.py` for the current honest benchmark.
 
 The trained neural model and metrics are stored at:
 

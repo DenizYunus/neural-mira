@@ -159,10 +159,10 @@ def scalar_prior_score(features: dict[str, float] | list[float] | tuple[float, .
     return sum(float(weights.get(name, 0.0)) * float(value) for name, value in zip(FEATURE_NAMES, features))
 
 
-def build_query_from_row(row: dict[str, Any]) -> QuerySpec:
+def build_query_from_row(row: dict[str, Any], oracle_window: bool = False) -> QuerySpec:
     override_window = None
     window = row.get("positive_window")
-    if isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
+    if oracle_window and isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
         override_window = (window[0], window[1])
     return build_query_spec(str(row.get("query") or ""), override_window)
 

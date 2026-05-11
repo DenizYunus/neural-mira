@@ -18,15 +18,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained HTEMA ranker on generated query examples.")
     parser.add_argument("--training", type=Path, default=DEFAULT_TRAINING)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--oracle-window",
+        action="store_true",
+        help="Use positive_window labels as query time windows. Diagnostic only; leaks labels into evaluation.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     rows = load_jsonl(args.training)
+    if not rows:
+        raise SystemExit(f"No evaluation rows found at {args.training}")
     memories = parse_diary_memories()
     model = json.loads(args.model.read_text(encoding="utf-8"))
-    print(json.dumps(evaluate(rows, memories, model["weights"]), indent=2))
+    print(json.dumps(evaluate(rows, memories, model["weights"], oracle_window=args.oracle_window), indent=2))
     return 0
 
 

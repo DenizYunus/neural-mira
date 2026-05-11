@@ -11,6 +11,7 @@ from typing import Any
 
 from htema_core import (
     FEATURE_NAMES,
+    anchor_ordinals,
     build_query_spec,
     feature_vector,
     load_jsonl,
@@ -78,7 +79,13 @@ def candidate_negatives(example: dict[str, Any], positives: list[Any], memories:
     return (hard[: count // 2] + pool[: count])[:count]
 
 
-def examples_to_pairs(rows: list[dict[str, Any]], memories: list[Any], negatives_per_positive: int, seed: int) -> list[tuple[dict[str, float], dict[str, float]]]:
+def examples_to_pairs(
+    rows: list[dict[str, Any]],
+    memories: list[Any],
+    negatives_per_positive: int,
+    seed: int,
+    oracle_window: bool = False,
+) -> list[tuple[dict[str, float], dict[str, float]]]:
     rng = random.Random(seed)
     memories_by_id = {memory.entry_id: memory for memory in memories}
     memories_by_date = {memory.date: memory for memory in memories}
@@ -90,10 +97,10 @@ def examples_to_pairs(rows: list[dict[str, Any]], memories: list[Any], negatives
             continue
         override_window = None
         window = row.get("positive_window")
-        if isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
+        if oracle_window and isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
             override_window = (window[0], window[1])
         query = build_query_spec(str(row.get("query") or ""), override_window)
-        anchors = [memory.ordinal for memory in positives]
+        anchors = anchor_ordinals(query, memories)
         negatives = candidate_negatives(row, positives, memories, rng, negatives_per_positive * len(positives))
 
         for positive in positives:
@@ -105,7 +112,13 @@ def examples_to_pairs(rows: list[dict[str, Any]], memories: list[Any], negatives
     return pairs
 
 
-def evaluate(rows: list[dict[str, Any]], memories: list[Any], weights: dict[str, float], top_k: int = 5) -> dict[str, float]:
+def evaluate(
+    rows: list[dict[str, Any]],
+    memories: list[Any],
+    weights: dict[str, float],
+    top_k: int = 5,
+    oracle_window: bool = False,
+) -> dict[str, float]:
     if not rows:
         return {"queries": 0, "recall_at_1": 0.0, "recall_at_5": 0.0, "mrr": 0.0}
 
@@ -123,7 +136,7 @@ def evaluate(rows: list[dict[str, Any]], memories: list[Any], weights: dict[str,
         positive_ids = {memory.entry_id for memory in positives}
         override_window = None
         window = row.get("positive_window")
-        if isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
+        if oracle_window and isinstance(window, list) and len(window) == 2 and all(isinstance(item, str) for item in window):
             override_window = (window[0], window[1])
         query = build_query_spec(str(row.get("query") or ""), override_window)
         ranked = score_memories(query, memories, weights)
@@ -186,6 +199,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negatives", type=int, default=18)
     parser.add_argument("--test-ratio", type=float, default=0.18)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--oracle-window",
+        action="store_true",
+        help="Use positive_window labels as query time windows. Diagnostic only; leaks labels into evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -197,7 +215,7 @@ def main() -> int:
 
     memories = parse_diary_memories()
     train_rows, test_rows = split_train_test(rows, args.test_ratio, args.seed)
-    pairs = examples_to_pairs(train_rows, memories, args.negatives, args.seed)
+    pairs = examples_to_pairs(train_rows, memories, args.negatives, args.seed, args.oracle_window)
     if not pairs:
         raise SystemExit("No pairwise training pairs could be built.")
 
@@ -214,10 +232,10 @@ def main() -> int:
         "unresolved": 0.25,
         "contradiction": 0.25,
     }
-    print("baseline", json.dumps(evaluate(test_rows, memories, baseline), indent=2))
+    print("baseline", json.dumps(evaluate(test_rows, memories, baseline, oracle_window=args.oracle_window), indent=2))
     weights = train_pairwise(pairs, args.epochs, args.lr, args.l2)
-    train_metrics = evaluate(train_rows, memories, weights)
-    test_metrics = evaluate(test_rows, memories, weights)
+    train_metrics = evaluate(train_rows, memories, weights, oracle_window=args.oracle_window)
+    test_metrics = evaluate(test_rows, memories, weights, oracle_window=args.oracle_window)
 
     model = {
         "name": "HTEMA lightweight pairwise ranker",
@@ -228,6 +246,7 @@ def main() -> int:
         "training_rows": len(train_rows),
         "test_rows": len(test_rows),
         "pairs": len(pairs),
+        "oracle_window": bool(args.oracle_window),
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
     }

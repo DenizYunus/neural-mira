@@ -12,7 +12,7 @@ import torch
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from htema_core import load_jsonl, parse_diary_memories, split_train_test
+from htema_core import anchor_ordinals, load_jsonl, parse_diary_memories, split_train_test
 from neural_htema_common import (
     DEFAULT_EMBEDDINGS,
     DEFAULT_METRICS,
@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--oracle-window",
+        action="store_true",
+        help="Use positive_window labels as query time windows. Diagnostic only; leaks labels into evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +88,7 @@ def make_candidate_batch(
     rng: random.Random,
     negatives: int,
     device: torch.device,
+    oracle_window: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
     q_embs = []
     q_features = []
@@ -99,8 +105,8 @@ def make_candidate_batch(
         if len(negatives_for_row) < negatives:
             continue
         candidates = [positive, *negatives_for_row[:negatives]]
-        query = build_query_from_row(row)
-        anchors = [memory.ordinal for memory in positives]
+        query = build_query_from_row(row, oracle_window=oracle_window)
+        anchors = anchor_ordinals(query, memories)
         indices = [memory_id_to_index[memory.entry_id] for memory in candidates]
 
         q_embs.append(query_embedding_for(row, query_index, query_embeddings))
@@ -136,6 +142,7 @@ def evaluate(
     stats: dict[str, float],
     device: torch.device,
     top_k: int = 5,
+    oracle_window: bool = False,
 ) -> dict[str, float]:
     if not rows:
         return {"queries": 0, "recall_at_1": 0.0, "recall_at_5": 0.0, "mrr": 0.0}
@@ -153,8 +160,8 @@ def evaluate(
         if not positives:
             continue
         positive_ids = {memory.entry_id for memory in positives}
-        query = build_query_from_row(row)
-        anchors = [memory.ordinal for memory in positives]
+        query = build_query_from_row(row, oracle_window=oracle_window)
+        anchors = anchor_ordinals(query, memories)
         pair_features = torch.tensor(
             [[pair_feature_values(memory, query, anchors) for memory in memories]],
             dtype=torch.float32,
@@ -265,6 +272,7 @@ def main() -> int:
                 rng,
                 args.negatives,
                 device,
+                args.oracle_window,
             )
             if batch is None:
                 continue
@@ -297,6 +305,7 @@ def main() -> int:
                 query_embeddings,
                 stats,
                 device,
+                oracle_window=args.oracle_window,
             )
             epoch_record["test_metrics"] = test_metrics
             print(f"epoch={epoch} loss={epoch_record['loss']:.4f} test={json.dumps(test_metrics)}")
@@ -320,6 +329,7 @@ def main() -> int:
         query_embeddings,
         stats,
         device,
+        oracle_window=args.oracle_window,
     )
     test_metrics = evaluate(
         model,
@@ -333,6 +343,7 @@ def main() -> int:
         query_embeddings,
         stats,
         device,
+        oracle_window=args.oracle_window,
     )
     full_metrics = evaluate(
         model,
@@ -346,6 +357,7 @@ def main() -> int:
         query_embeddings,
         stats,
         device,
+        oracle_window=args.oracle_window,
     )
 
     checkpoint = {
@@ -354,6 +366,7 @@ def main() -> int:
         "created_at": int(time.time()),
         "training_rows": len(train_rows),
         "test_rows": len(test_rows),
+        "oracle_window": bool(args.oracle_window),
         "history": history,
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,

@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--embeddings", type=Path, default=DEFAULT_EMBEDDINGS)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--oracle-window",
+        action="store_true",
+        help="Use positive_window labels as query time windows. Diagnostic only; leaks labels into evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -66,6 +71,7 @@ def main() -> int:
         cache["query_embeddings"].to(torch.float32),
         stats,
         device,
+        oracle_window=args.oracle_window,
     )
     print(json.dumps(metrics, indent=2))
     return 0
