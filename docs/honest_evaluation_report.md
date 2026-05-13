@@ -9,12 +9,12 @@ Rules:
 - BM25 and dense semantic embedding baselines run over the same memory tokens.
 - Neural MIRA is evaluated as a candidate reranker when `candidate_top_k` is greater than zero.
 
-Generated at: 2026-05-12T23:08:40Z
-Memory tokens: 5950
+Generated at: 2026-05-13T03:24:01Z
+Memory tokens: 7448
 Diary tokens: 350
-WhatsApp tokens: 5600
+WhatsApp tokens: 7098
 Deterministic benchmark queries: 3000
-Total generated benchmark queries before cap: 28895
+Total generated benchmark queries before cap: 34673
 Extra augmented queries loaded: 5800
 Candidate top-k for neural reranking: 768
 
@@ -24,39 +24,39 @@ Train examples: 2340; test examples: 660
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.279 | 0.383 | 0.338 |
-| semantic_embed | 0.014 | 0.039 | 0.035 |
-| scalar_htema | 0.280 | 0.453 | 0.371 |
-| neural_mira | 0.461 | 0.655 | 0.554 |
+| bm25 | 0.286 | 0.412 | 0.350 |
+| semantic_embed | 0.014 | 0.036 | 0.033 |
+| scalar_htema | 0.277 | 0.439 | 0.357 |
+| neural_mira | 0.509 | 0.677 | 0.587 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.353 | 0.259 | 0.761 |
-| semantic_embed | 0.036 | 0.026 | 0.090 |
-| scalar_htema | 0.401 | 0.302 | 0.475 |
-| neural_mira | 0.538 | 0.549 | 0.835 |
+| bm25 | 0.379 | 0.271 | 0.610 |
+| semantic_embed | 0.034 | 0.019 | 0.124 |
+| scalar_htema | 0.396 | 0.314 | 0.215 |
+| neural_mira | 0.573 | 0.572 | 0.870 |
 
-Calibration: neural=2.00, bm25=0.10, semantic=0.10, scalar=0.00, dev_calibration_mrr=0.52
+Calibration: neural=1.60, bm25=0.00, semantic=0.00, scalar=0.10, dev_calibration_mrr=0.54
 
 ## month_holdout
 
-Train examples: 2514; test examples: 486
+Train examples: 2494; test examples: 506
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.278 | 0.381 | 0.333 |
-| semantic_embed | 0.016 | 0.049 | 0.041 |
-| scalar_htema | 0.321 | 0.490 | 0.408 |
-| neural_mira | 0.469 | 0.675 | 0.564 |
+| bm25 | 0.259 | 0.364 | 0.317 |
+| semantic_embed | 0.012 | 0.042 | 0.031 |
+| scalar_htema | 0.318 | 0.474 | 0.396 |
+| neural_mira | 0.478 | 0.646 | 0.559 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.360 | 0.289 | 0.176 |
-| semantic_embed | 0.049 | 0.026 | 0.032 |
-| scalar_htema | 0.438 | 0.352 | 0.371 |
-| neural_mira | 0.569 | 0.551 | 0.584 |
+| bm25 | 0.368 | 0.230 | 0.177 |
+| semantic_embed | 0.043 | 0.008 | 0.028 |
+| scalar_htema | 0.439 | 0.326 | 0.239 |
+| neural_mira | 0.585 | 0.511 | 0.548 |
 
-Calibration: neural=2.00, bm25=0.10, semantic=0.00, scalar=0.10, dev_calibration_mrr=0.57
+Calibration: neural=2.00, bm25=0.10, semantic=0.00, scalar=0.35, dev_calibration_mrr=0.55
 
 ## style_holdout
 
@@ -64,16 +64,16 @@ Train examples: 2815; test examples: 185
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.038 | 0.108 | 0.084 |
-| semantic_embed | 0.005 | 0.022 | 0.022 |
-| scalar_htema | 0.330 | 0.670 | 0.493 |
-| neural_mira | 0.400 | 0.795 | 0.566 |
+| bm25 | 0.054 | 0.114 | 0.095 |
+| semantic_embed | 0.000 | 0.005 | 0.013 |
+| scalar_htema | 0.292 | 0.643 | 0.450 |
+| neural_mira | 0.389 | 0.724 | 0.535 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.109 | 0.037 | 0.006 |
-| semantic_embed | 0.033 | 0.001 | 0.010 |
-| scalar_htema | 0.498 | 0.466 | 1.000 |
-| neural_mira | 0.497 | 0.689 | 1.000 |
+| bm25 | 0.116 | 0.056 | 0.006 |
+| semantic_embed | 0.019 | 0.001 | 0.010 |
+| scalar_htema | 0.494 | 0.367 | 0.295 |
+| neural_mira | 0.491 | 0.608 | 1.000 |
 
-Calibration: neural=2.00, bm25=0.00, semantic=0.00, scalar=0.10, dev_calibration_mrr=0.61
+Calibration: neural=2.00, bm25=0.00, semantic=0.10, scalar=0.10, dev_calibration_mrr=0.59
