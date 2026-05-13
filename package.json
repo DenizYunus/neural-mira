@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Diary-focused temporal and emotional attention prototype for Jarvis memory retrieval.",
+  "description": "Diary and WhatsApp temporal-emotional attention prototype for Jarvis memory retrieval.",
   "scripts": {
     "demo": "node src/diary_attention.mjs",
     "query": "node src/diary_attention.mjs",
     "generate:queries": "python3 scripts/generate_training_queries.py",
+    "augment:styles": "python3 scripts/generate_style_augmentations.py",
     "train": "python3 scripts/train_htema.py",
     "search": "python3 scripts/search_htema.py",
     "evaluate": "python3 scripts/evaluate_htema.py",

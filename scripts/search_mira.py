@@ -14,10 +14,11 @@ from honest_mira import (
     EvalExample,
     NeuralMIRARanker,
     SemanticLsaIndex,
+    align_feature_matrix,
     build_pair_features,
     normalize_component,
 )
-from htema_core import FEATURE_NAMES, build_query_spec, compact_text, parse_diary_memories
+from htema_core import FEATURE_NAMES, build_query_spec, compact_text, parse_all_memories
 
 
 def torch_load(path: Path, device: str | torch.device = "cpu"):
@@ -32,7 +33,7 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
     if not model_path.exists():
         raise SystemExit(f"No neural MIRA model found at {model_path}. Run scripts/honest_mira.py first.")
 
-    memories = parse_diary_memories()
+    memories = parse_all_memories()
     checkpoint = torch_load(model_path, device)
     model = NeuralMIRARanker(len(checkpoint["feature_names"])).to(device)
     model.load_state_dict(checkpoint["state_dict"])
@@ -47,7 +48,8 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
         style="ad_hoc",
         target_month="",
     )
-    features, components, _ = build_pair_features([example], memories, bm25, semantic)
+    features, components, feature_names = build_pair_features([example], memories, bm25, semantic)
+    features = align_feature_matrix(features, feature_names, checkpoint["feature_names"])
     mean = checkpoint["mean"]
     std = checkpoint["std"]
     x = torch.tensor((features - mean) / std, dtype=torch.float32, device=device)
@@ -64,7 +66,7 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Search diary memories with the trained neural MIRA ranker.")
+    parser = argparse.ArgumentParser(description="Search diary and WhatsApp memories with the trained neural MIRA ranker.")
     parser.add_argument("query", nargs="+")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--limit", type=int, default=8)
@@ -112,6 +114,8 @@ def main() -> int:
                 "semantic": float(components["semantic"][0, index]),
                 "scalar": float(components["scalar"][0, index]),
                 "icons": memory.icons,
+                "source_type": getattr(memory, "source_type", "diary"),
+                "participants": list(getattr(memory, "participants", ())),
                 "preview": compact_text(memory.text, 900 if args.show_text else 360),
             }
         )
@@ -146,6 +150,8 @@ def main() -> int:
             )
         )
         print(result["entry_id"])
+        if result["source_type"] == "whatsapp" and result["participants"]:
+            print("participants:", ", ".join(result["participants"][:6]))
         print(result["preview"])
     return 0
 

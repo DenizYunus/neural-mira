@@ -1,21 +1,23 @@
 # Memory Attention Lab
 
-Separate experiment for a diary-focused, Transformer-like retrieval mechanism.
+Separate experiment for a personal-memory, Transformer-like retrieval mechanism over diary entries and WhatsApp conversation windows.
 
 The lab now has three working layers:
 
 1. A lightweight deterministic / scalar HTEMA ranker that runs immediately on the local DailyBean diary files.
 2. A leakage-free evaluation harness that compares BM25, dense semantic embeddings, scalar HTEMA, and neural MIRA from query text only.
-3. A neural MIRA ranker that learns over semantic, temporal, emotional, diary-feature, continuity, BM25, and dense semantic evidence heads.
+3. A neural MIRA ranker that learns over semantic, temporal, emotional, diary-feature, source, participant, continuity, BM25, and dense semantic evidence heads.
 
 ## Idea
 
-Each diary day becomes a memory token:
+Each diary day or WhatsApp conversation window becomes a memory token:
 
 ```text
-token(day) = {
+token(memory) = {
   key: semantic + time + emotion + diary-feature projections,
-  value: day text + extracted metadata + neighboring sequence context
+  value: memory text + extracted metadata + neighboring sequence context
+  source: diary | whatsapp
+  participants: people attached to the memory window
 }
 ```
 
@@ -102,6 +104,29 @@ python3 scripts/generate_training_queries.py --limit 5 --dry-run
 
 The output is JSONL: one generated query training example per line.
 
+## Generate Query Style Augmentations
+
+The style augmenter uses the unified diary + WhatsApp benchmark and asks DeepSeek/OpenAI-compatible chat completions to create more natural query phrasings: vague fragments, Turkish-English mixes, typo-heavy search queries, voice-assistant style requests, emotional reflection, relationship context, and cross-source diary/WhatsApp questions.
+
+```bash
+python scripts/generate_style_augmentations.py --dry-run --limit 8 --output data/style_aug_prompt_preview.jsonl
+python scripts/generate_style_augmentations.py --limit 1000 --augmentations-per-example 8 --batch-size 1 --workers 8 --model deepseek-v4-flash --output data/style_augmented_queries.jsonl
+```
+
+The script resumes safely by default. Re-running the same command only fills base examples that still need more augmentations.
+
+Use the generated augmentations in the honest benchmark:
+
+```bash
+python scripts/honest_mira.py --split all --epochs 35 --max-examples 2400 --candidate-top-k 768 --batch-size 16 --extra-examples data/style_augmented_queries.jsonl
+```
+
+To focus on the current weak spot, generate more style-holdout-like examples:
+
+```bash
+python scripts/generate_style_augmentations.py --limit 1200 --augmentations-per-example 8 --style-filter emotion_month,mood_signal,relative_temporal --batch-size 1 --workers 8 --model deepseek-v4-flash --output data/style_augmented_queries.jsonl
+```
+
 Full-corpus generation can be parallelized by year:
 
 ```bash
@@ -160,15 +185,15 @@ Generated JSONL data is ignored by git because it contains private diary-derived
 The main current evaluator is:
 
 ```bash
-python scripts/honest_mira.py --split all --epochs 35
+python scripts/honest_mira.py --split all --epochs 35 --max-examples 1800 --candidate-top-k 768
 ```
 
-It generates a deterministic diary-native benchmark from the local day tokens, then evaluates:
+It generates a deterministic personal-memory benchmark from local diary day tokens and WhatsApp conversation windows, then evaluates:
 
-- `bm25`: Okapi BM25 over diary day text
+- `bm25`: Okapi BM25 over memory text
 - `semantic_embed`: dense LSA/SVD semantic embeddings over TF-IDF text
 - `scalar_htema`: fixed transparent HTEMA prior
-- `neural_mira`: PyTorch ranker over HTEMA heads plus BM25 and dense semantic evidence
+- `neural_mira`: PyTorch candidate reranker over HTEMA heads, source/participant features, BM25, and dense semantic evidence
 
 Rules:
 
@@ -176,8 +201,11 @@ Rules:
 - `positive_window` is not used.
 - Target dates are labels only.
 - Random, month-holdout, and query-style-holdout splits are all reported.
+- WhatsApp-derived labels are evaluated separately from diary labels in the report.
+- `--candidate-top-k` makes neural evaluation scalable by reranking a transparent candidate pool built from BM25, semantic LSA, and scalar HTEMA.
+- Candidate reranking calibrates neural, BM25, semantic, and scalar scores on the dev split so the final model can fall back toward transparent HTEMA when a held-out query style needs it.
 
-Current honest run:
+Diary-only honest run before WhatsApp expansion:
 
 ```text
 Split: random
@@ -199,6 +227,27 @@ Scalar HTEMA      R@1 0.266   R@5 0.665   MRR 0.443
 Neural MIRA       R@1 0.320   R@5 0.706   MRR 0.491
 ```
 
+Current WhatsApp-expanded corpus:
+
+```text
+Memory tokens: 5950
+Diary tokens: 350
+WhatsApp tokens: 5600
+Generated benchmark examples before cap: 23095
+Default benchmark cap: 1800 stratified examples
+Default neural candidate pool: 768 memories/query
+```
+
+Small warning-as-error smoke run after WhatsApp expansion:
+
+```text
+Split: random, max_examples=120, candidate_top_k=96
+BM25              R@1 0.346   R@5 0.462   MRR 0.415
+Semantic embed    R@1 0.000   R@5 0.115   MRR 0.049
+Scalar HTEMA      R@1 0.423   R@5 0.846   MRR 0.616
+Neural MIRA       R@1 0.500   R@5 0.846   MRR 0.642
+```
+
 The generated aggregate report is stored at:
 
 ```text
@@ -216,6 +265,7 @@ Search with the trained neural MIRA ranker:
 
 ```bash
 python scripts/search_mira.py "happiest days at the end of 2024" --limit 8
+python scripts/search_mira.py "what did Kemal Piknik Budapest say about ahshahahahahahshs" --limit 5 --include-out-of-window
 python scripts/search_mira.py "sad and anxious days in May 2025" --limit 8 --json
 ```
 

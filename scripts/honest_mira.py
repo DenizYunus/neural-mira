@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,6 @@ import numpy as np
 import torch
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import normalize
 from torch import nn
 from torch.nn import functional as F
 
@@ -27,6 +27,7 @@ from htema_core import (
     build_query_spec,
     dot,
     feature_vector,
+    parse_all_memories,
     parse_diary_memories,
     tokenize,
 )
@@ -95,6 +96,16 @@ SCALAR_PRIOR_WEIGHTS = {
     "contradiction": 0.15,
 }
 
+SOURCE_FEATURE_NAMES = [
+    "query_mentions_whatsapp",
+    "query_mentions_diary",
+    "memory_is_whatsapp",
+    "memory_is_diary",
+    "source_match",
+    "participant_match",
+    "participant_count_norm",
+]
+
 
 @dataclass(frozen=True)
 class EvalExample:
@@ -150,17 +161,116 @@ class SemanticLsaIndex:
             ngram_range=(1, 2),
             token_pattern=r"(?u)\b[\w'-]+\b",
             max_features=9000,
+            dtype=np.float32,
         )
         sparse = self.vectorizer.fit_transform(texts)
         max_components = min(max(2, sparse.shape[0] - 1), max(2, sparse.shape[1] - 1), components)
-        self.svd = TruncatedSVD(n_components=max_components, random_state=13)
-        dense = self.svd.fit_transform(sparse)
-        self.embeddings = normalize(dense)
+        self.svd = TruncatedSVD(n_components=max_components, algorithm="randomized", n_iter=7, random_state=13)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                dense = self.svd.fit_transform(sparse)
+        self.embeddings = safe_l2_normalize(dense)
 
     def scores(self, query: str) -> np.ndarray:
         sparse = self.vectorizer.transform([query])
-        dense = normalize(self.svd.transform(sparse))
-        return np.asarray(self.embeddings @ dense.T, dtype=np.float32).reshape(-1)
+        if sparse.nnz == 0:
+            return np.zeros(self.embeddings.shape[0], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                dense = safe_l2_normalize(self.svd.transform(sparse))
+                scores = self.embeddings @ dense.T
+        return np.nan_to_num(
+            np.asarray(scores, dtype=np.float32).reshape(-1),
+            nan=0.0,
+            posinf=1.0,
+            neginf=-1.0,
+        )
+
+
+def safe_l2_normalize(values: np.ndarray) -> np.ndarray:
+    array = np.nan_to_num(np.asarray(values, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    norms = np.linalg.norm(array, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    return (array / norms).astype(np.float32)
+
+
+def query_mentions_whatsapp(query: str) -> bool:
+    lowered = query.lower()
+    return bool(
+        re_search_any(
+            lowered,
+            [
+                "whatsapp",
+                "conversation",
+                "conversations",
+                "chat",
+                "chats",
+                "message",
+                "messages",
+                "said",
+                "say about",
+                "mentioned",
+                "mesaj",
+                "konuş",
+                "konus",
+            ],
+        )
+    )
+
+
+def query_mentions_diary(query: str) -> bool:
+    lowered = query.lower()
+    return bool(re_search_any(lowered, ["diary", "dailybean", "entry", "mood", "icons", "day happened"]))
+
+
+def re_search_any(text: str, terms: list[str]) -> bool:
+    return any(term in text for term in terms)
+
+
+def source_feature_values(memory: DiaryMemory, query_text: str, query_tokens: set[str]) -> list[float]:
+    is_whatsapp = 1.0 if getattr(memory, "source_type", "diary") == "whatsapp" else 0.0
+    is_diary = 1.0 - is_whatsapp
+    wants_whatsapp = 1.0 if query_mentions_whatsapp(query_text) else 0.0
+    wants_diary = 1.0 if query_mentions_diary(query_text) else 0.0
+    if wants_whatsapp or wants_diary:
+        source_match = max(wants_whatsapp * is_whatsapp, wants_diary * is_diary)
+    else:
+        source_match = 0.5
+
+    participant_tokens: set[str] = set()
+    for participant in getattr(memory, "participants", ()):
+        participant_tokens.update(tokenize(participant))
+    participant_match = len(query_tokens.intersection(participant_tokens)) / max(len(query_tokens), 1)
+
+    return [
+        wants_whatsapp,
+        wants_diary,
+        is_whatsapp,
+        is_diary,
+        source_match,
+        min(1.0, participant_match * 3.0),
+        min(len(getattr(memory, "participants", ())), 8) / 8,
+    ]
+
+
+def align_feature_matrix(
+    features: np.ndarray,
+    generated_names: list[str],
+    expected_names: list[str],
+) -> np.ndarray:
+    if generated_names == expected_names:
+        return features
+    lookup = {name: index for index, name in enumerate(generated_names)}
+    aligned = np.zeros((*features.shape[:-1], len(expected_names)), dtype=np.float32)
+    for out_index, name in enumerate(expected_names):
+        source_index = lookup.get(name)
+        if source_index is not None:
+            aligned[..., out_index] = features[..., source_index]
+    return aligned
 
 
 class NeuralMIRARanker(nn.Module):
@@ -412,8 +522,183 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                 target_date=memory.date,
             )
 
+    # -----------------------------------------------------------------------
+    # WhatsApp-specific queries
+    # -----------------------------------------------------------------------
+    whatsapp_memories = [m for m in memories if getattr(m, 'source_type', 'diary') == 'whatsapp']
+    by_participant: dict[str, list[DiaryMemory]] = defaultdict(list)
+    for memory in whatsapp_memories:
+        for participant in getattr(memory, 'participants', ()):
+            # Skip Deniz's own name
+            if 'deniz' in participant.lower() or 'göğüş' in participant.lower():
+                continue
+            by_participant[participant].append(memory)
+
+    for participant, participant_memories in by_participant.items():
+        clean_name = clean_query_term(participant.split('(')[0].strip())
+        if not clean_name or len(clean_name) < 3:
+            continue
+
+        # Group by month for temporal queries
+        wa_by_month: dict[str, list[DiaryMemory]] = defaultdict(list)
+        for memory in participant_memories:
+            wa_by_month[month_key(memory)].append(memory)
+
+        for key, month_mems in sorted(wa_by_month.items()):
+            label = month_label(month_mems[0])
+            positives = [m.entry_id for m in month_mems]
+            if not positives:
+                continue
+
+            # "conversations with X in Month Year"
+            add_example(
+                examples, seen,
+                query=f"conversations with {participant} in {label}",
+                positive_ids=positives,
+                intent="whatsapp_temporal_recall",
+                style="whatsapp_person_month",
+                target_month=key,
+                note=f"group query: all {participant} conversations in {label}",
+            )
+
+        # Per-memory queries for WhatsApp with rare terms
+        for memory in participant_memories:
+            key = month_key(memory)
+            label = month_label(memory)
+            terms = rare_by_id.get(memory.entry_id, [])
+
+            if len(terms) >= 2:
+                phrase = " ".join(terms[:2])
+                add_example(
+                    examples, seen,
+                    query=f"what did {participant} say about {phrase}",
+                    positive_ids=[memory.entry_id],
+                    intent="whatsapp_semantic_recall",
+                    style="whatsapp_topic",
+                    target_month=key,
+                    target_date=memory.date,
+                )
+
+            if len(terms) >= 1:
+                # Continuity: messages around this conversation
+                neighbor_ids = [
+                    item.entry_id
+                    for item in memories
+                    if abs(item.ordinal - memory.ordinal) <= 1
+                ]
+                if len(neighbor_ids) > 1:
+                    add_example(
+                        examples, seen,
+                        query=f"what was happening around when {participant} mentioned {terms[0]}",
+                        positive_ids=neighbor_ids,
+                        intent="whatsapp_continuity_recall",
+                        style="whatsapp_around",
+                        target_month=key,
+                        target_date=memory.date,
+                        note="cross-source continuity: nearby diary + whatsapp memories",
+                    )
+
     rng.shuffle(examples)
     return examples
+
+
+def load_augmented_examples(paths: list[Path], memories: list[DiaryMemory]) -> list[EvalExample]:
+    memory_by_id = {memory.entry_id: memory for memory in memories}
+    loaded: list[EvalExample] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+
+    for path in paths:
+        if not path.exists():
+            print(f"warning: extra examples file not found: {path}")
+            continue
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"warning: skipped invalid JSON at {path}:{line_number}")
+                    continue
+
+                query = str(row.get("query") or "").strip()
+                positives = tuple(sorted(set(str(item) for item in row.get("positive_ids") or [])))
+                if not query or not positives:
+                    continue
+                if any(entry_id not in memory_by_id for entry_id in positives):
+                    continue
+
+                key = (query.lower(), positives)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                first_memory = memory_by_id[positives[0]]
+                loaded.append(
+                    EvalExample(
+                        query=query,
+                        positive_ids=positives,
+                        intent=str(row.get("intent") or "style_augmented_recall"),
+                        style=str(row.get("style") or row.get("augmentation_style") or "aug_llm_style"),
+                        target_month=str(row.get("target_month") or month_key(first_memory)),
+                        target_date=row.get("target_date") or (first_memory.date if len(positives) == 1 else None),
+                        note=str(row.get("note") or row.get("why") or "LLM style augmentation"),
+                    )
+                )
+    return loaded
+
+
+def merge_examples(base: list[EvalExample], extra: list[EvalExample]) -> list[EvalExample]:
+    merged: list[EvalExample] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for example in [*base, *extra]:
+        key = (example.query.lower().strip(), tuple(sorted(example.positive_ids)))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(example)
+    return merged
+
+
+def example_source(example: EvalExample) -> str:
+    has_whatsapp = any(entry_id.startswith("whatsapp:") for entry_id in example.positive_ids)
+    has_diary = any(not entry_id.startswith("whatsapp:") for entry_id in example.positive_ids)
+    if has_whatsapp and has_diary:
+        return "mixed"
+    if has_whatsapp:
+        return "whatsapp"
+    return "diary"
+
+
+def stratified_limit_examples(
+    examples: list[EvalExample],
+    max_examples: int,
+    seed: int,
+) -> list[EvalExample]:
+    if max_examples <= 0 or len(examples) <= max_examples:
+        return examples
+
+    rng = random.Random(seed)
+    groups: dict[tuple[str, str], list[EvalExample]] = defaultdict(list)
+    for example in examples:
+        groups[(example_source(example), example.style)].append(example)
+    for values in groups.values():
+        rng.shuffle(values)
+
+    selected: list[EvalExample] = []
+    keys = sorted(groups)
+    while len(selected) < max_examples and keys:
+        next_keys = []
+        for key in keys:
+            values = groups[key]
+            if values and len(selected) < max_examples:
+                selected.append(values.pop())
+            if values:
+                next_keys.append(key)
+        keys = next_keys
+
+    rng.shuffle(selected)
+    return selected
 
 
 def split_examples(
@@ -461,6 +746,8 @@ def rank_metrics(examples: list[EvalExample], memories: list[DiaryMemory], score
     recall_5 = 0
     reciprocal = 0.0
     by_style: dict[str, list[float]] = defaultdict(list)
+    by_source: dict[str, list[float]] = defaultdict(list)
+    by_intent: dict[str, list[float]] = defaultdict(list)
 
     for row_index, example in enumerate(examples):
         positive_ids = set(example.positive_ids)
@@ -472,6 +759,8 @@ def rank_metrics(examples: list[EvalExample], memories: list[DiaryMemory], score
         recall_5 += int(bool(top_5.intersection(positive_ids)))
         reciprocal += rr
         by_style[example.style].append(rr)
+        by_source[example_source(example)].append(rr)
+        by_intent[example.intent].append(rr)
 
     payload: dict[str, float] = {
         "queries": float(len(examples)),
@@ -481,6 +770,50 @@ def rank_metrics(examples: list[EvalExample], memories: list[DiaryMemory], score
     }
     for style, values in sorted(by_style.items()):
         payload[f"mrr_style/{style}"] = float(sum(values) / len(values))
+    for source, values in sorted(by_source.items()):
+        payload[f"mrr_source/{source}"] = float(sum(values) / len(values))
+    for intent, values in sorted(by_intent.items()):
+        payload[f"mrr_intent/{intent}"] = float(sum(values) / len(values))
+    return payload
+
+
+def rank_metrics_candidates(
+    examples: list[EvalExample],
+    memories: list[DiaryMemory],
+    score_matrix: np.ndarray,
+    candidate_indices: np.ndarray,
+) -> dict[str, float]:
+    if not examples:
+        return {"queries": 0, "recall_at_1": 0.0, "recall_at_5": 0.0, "mrr": 0.0, "candidate_recall": 0.0}
+    memory_ids = [memory.entry_id for memory in memories]
+    recall_1 = 0
+    recall_5 = 0
+    reciprocal = 0.0
+    candidate_recall = 0
+    by_source: dict[str, list[float]] = defaultdict(list)
+
+    for row_index, example in enumerate(examples):
+        positive_ids = set(example.positive_ids)
+        row_candidates = [int(index) for index in candidate_indices[row_index]]
+        ranked_local = np.argsort(-score_matrix[row_index]).tolist()
+        ranked_ids = [memory_ids[row_candidates[index]] for index in ranked_local]
+        top_5 = set(ranked_ids[:5])
+        rr = reciprocal_rank(ranked_ids, positive_ids)
+        candidate_recall += int(any(entry_id in positive_ids for entry_id in ranked_ids))
+        recall_1 += int(bool(ranked_ids) and ranked_ids[0] in positive_ids)
+        recall_5 += int(bool(top_5.intersection(positive_ids)))
+        reciprocal += rr
+        by_source[example_source(example)].append(rr)
+
+    payload: dict[str, float] = {
+        "queries": float(len(examples)),
+        "recall_at_1": recall_1 / len(examples),
+        "recall_at_5": recall_5 / len(examples),
+        "mrr": reciprocal / len(examples),
+        "candidate_recall": candidate_recall / len(examples),
+    }
+    for source, values in sorted(by_source.items()):
+        payload[f"mrr_source/{source}"] = float(sum(values) / len(values))
     return payload
 
 
@@ -517,6 +850,7 @@ def build_pair_features(
     }
     feature_names = [
         *FEATURE_NAMES,
+        *SOURCE_FEATURE_NAMES,
         "bm25",
         "bm25_z",
         "bm25_rank",
@@ -533,6 +867,7 @@ def build_pair_features(
 
     for example in examples:
         query = build_query_spec(example.query)
+        query_tokens = set(query.tokens)
         anchors = anchor_ordinals(query, memories)
         bm25_scores = bm25.scores(example.query)
         semantic_scores = semantic.scores(example.query)
@@ -562,6 +897,7 @@ def build_pair_features(
             entity = float(base["entity"])
             row = [
                 *[float(base[name]) for name in FEATURE_NAMES],
+                *source_feature_values(memory, example.query, query_tokens),
                 bm25_value,
                 float(bm25_z[index]),
                 float(bm25_rank[index]),
@@ -587,11 +923,166 @@ def build_pair_features(
     return features, components, feature_names
 
 
-def target_matrix(examples: list[EvalExample], memories: list[DiaryMemory]) -> np.ndarray:
+def top_indices(values: np.ndarray, count: int) -> list[int]:
+    if count <= 0:
+        return []
+    count = min(count, len(values))
+    if count == len(values):
+        return np.argsort(-values).tolist()
+    indices = np.argpartition(-values, count - 1)[:count]
+    return indices[np.argsort(-values[indices])].tolist()
+
+
+def select_candidate_indices(
+    example: EvalExample,
+    memories: list[DiaryMemory],
+    bm25_scores: np.ndarray,
+    semantic_scores: np.ndarray,
+    scalar_scores: np.ndarray,
+    top_k: int,
+    include_positives: bool,
+) -> np.ndarray:
+    top_k = min(max(8, top_k), len(memories))
+    per_channel = max(8, top_k // 3)
+    selected: list[int] = []
+    seen: set[int] = set()
+    blended = minmax(bm25_scores) + minmax(semantic_scores) + minmax(scalar_scores)
+
+    def add(indices: list[int]) -> None:
+        for index in indices:
+            if index not in seen:
+                selected.append(index)
+                seen.add(index)
+
     memory_index = {memory.entry_id: index for index, memory in enumerate(memories)}
-    targets = np.zeros((len(examples), len(memories)), dtype=np.float32)
+    if include_positives:
+        add([memory_index[entry_id] for entry_id in example.positive_ids if entry_id in memory_index])
+    add(top_indices(bm25_scores, per_channel))
+    add(top_indices(semantic_scores, per_channel))
+    add(top_indices(scalar_scores, per_channel))
+
+    add(top_indices(blended, top_k))
+    ordered = sorted(selected, key=lambda index: float(blended[index]), reverse=True)
+    return np.asarray(ordered[:top_k], dtype=np.int32)
+
+
+def build_candidate_pair_features(
+    examples: list[EvalExample],
+    memories: list[DiaryMemory],
+    bm25: BM25Index,
+    semantic: SemanticLsaIndex,
+    candidate_top_k: int,
+    include_positives: bool,
+) -> tuple[np.ndarray, dict[str, np.ndarray], list[str], np.ndarray]:
+    all_rows = []
+    candidate_rows = []
+    full_components = {
+        "bm25": [],
+        "semantic_embed": [],
+        "scalar_htema": [],
+    }
+    feature_names = [
+        *FEATURE_NAMES,
+        *SOURCE_FEATURE_NAMES,
+        "bm25",
+        "bm25_z",
+        "bm25_rank",
+        "semantic_embed",
+        "semantic_z",
+        "semantic_rank",
+        "scalar_htema",
+        "semantic_x_temporal",
+        "bm25_x_temporal",
+        "emotion_x_temporal",
+        "entity_x_temporal",
+        "semantic_x_entity",
+    ]
+
+    for example in examples:
+        query = build_query_spec(example.query)
+        query_tokens = set(query.tokens)
+        anchors = anchor_ordinals(query, memories)
+        bm25_scores = bm25.scores(example.query)
+        semantic_scores = semantic.scores(example.query)
+        bm25_norm = minmax(bm25_scores)
+        semantic_norm = minmax(semantic_scores)
+        bm25_z = zscore(bm25_scores)
+        semantic_z = zscore(semantic_scores)
+        bm25_order = np.argsort(-bm25_scores)
+        semantic_order = np.argsort(-semantic_scores)
+        bm25_rank = np.zeros(len(memories), dtype=np.float32)
+        semantic_rank = np.zeros(len(memories), dtype=np.float32)
+        for rank, index in enumerate(bm25_order, start=1):
+            bm25_rank[index] = 1.0 / math.log2(rank + 1)
+        for rank, index in enumerate(semantic_order, start=1):
+            semantic_rank[index] = 1.0 / math.log2(rank + 1)
+
+        base_features = [feature_vector(memory, query, anchors) for memory in memories]
+        scalar_scores = np.asarray([dot(SCALAR_PRIOR_WEIGHTS, base) for base in base_features], dtype=np.float32)
+        candidates = select_candidate_indices(
+            example,
+            memories,
+            bm25_scores,
+            semantic_scores,
+            scalar_scores,
+            candidate_top_k,
+            include_positives,
+        )
+
+        rows = []
+        for index in candidates:
+            memory = memories[int(index)]
+            base = base_features[int(index)]
+            semantic_value = float(semantic_norm[index])
+            bm25_value = float(bm25_norm[index])
+            temporal = float(base["temporal"])
+            emotion = float(base["emotion"])
+            entity = float(base["entity"])
+            rows.append(
+                [
+                    *[float(base[name]) for name in FEATURE_NAMES],
+                    *source_feature_values(memory, example.query, query_tokens),
+                    bm25_value,
+                    float(bm25_z[index]),
+                    float(bm25_rank[index]),
+                    semantic_value,
+                    float(semantic_z[index]),
+                    float(semantic_rank[index]),
+                    float(scalar_scores[index]),
+                    semantic_value * temporal,
+                    bm25_value * temporal,
+                    emotion * temporal,
+                    entity * temporal,
+                    semantic_value * entity,
+                ]
+            )
+
+        all_rows.append(rows)
+        candidate_rows.append(candidates)
+        full_components["bm25"].append(bm25_scores)
+        full_components["semantic_embed"].append(semantic_scores)
+        full_components["scalar_htema"].append(scalar_scores)
+
+    features = np.asarray(all_rows, dtype=np.float32)
+    components = {name: np.asarray(values, dtype=np.float32) for name, values in full_components.items()}
+    return features, components, feature_names, np.asarray(candidate_rows, dtype=np.int32)
+
+
+def target_matrix(
+    examples: list[EvalExample],
+    memories: list[DiaryMemory],
+    candidate_indices: np.ndarray | None = None,
+) -> np.ndarray:
+    memory_index = {memory.entry_id: index for index, memory in enumerate(memories)}
+    width = candidate_indices.shape[1] if candidate_indices is not None else len(memories)
+    targets = np.zeros((len(examples), width), dtype=np.float32)
     for row_index, example in enumerate(examples):
-        indices = [memory_index[entry_id] for entry_id in example.positive_ids if entry_id in memory_index]
+        full_indices = [memory_index[entry_id] for entry_id in example.positive_ids if entry_id in memory_index]
+        if candidate_indices is not None:
+            row_lookup = {int(memory_index): local for local, memory_index in enumerate(candidate_indices[row_index])}
+            indices = [row_lookup[index] for index in full_indices if index in row_lookup]
+        else:
+            indices = full_indices
         if not indices:
             continue
         value = 1.0 / len(indices)
@@ -634,6 +1125,8 @@ def train_neural_mira(
     test_features: np.ndarray,
     train_components: dict[str, np.ndarray],
     test_components: dict[str, np.ndarray],
+    train_candidate_indices: np.ndarray | None = None,
+    test_candidate_indices: np.ndarray | None = None,
     *,
     epochs: int,
     batch_size: int,
@@ -654,7 +1147,7 @@ def train_neural_mira(
     std = np.where(std < 1e-6, 1.0, std).astype(np.float32)
     mean = mean.astype(np.float32)
 
-    train_targets = target_matrix(train_examples, memories)
+    train_targets = target_matrix(train_examples, memories, train_candidate_indices)
     model = NeuralMIRARanker(train_features.shape[-1]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.015)
 
@@ -686,7 +1179,16 @@ def train_neural_mira(
         record = {"epoch": epoch, "loss": float(sum(losses) / max(len(losses), 1))}
         if should_eval:
             dev_scores = neural_scores(model, train_features[dev_indices], mean, std, device)
-            dev_metrics = rank_metrics([train_examples[index] for index in dev_indices], memories, dev_scores)
+            dev_metrics = (
+                rank_metrics_candidates(
+                    [train_examples[index] for index in dev_indices],
+                    memories,
+                    dev_scores,
+                    train_candidate_indices[dev_indices],
+                )
+                if train_candidate_indices is not None
+                else rank_metrics([train_examples[index] for index in dev_indices], memories, dev_scores)
+            )
             record["dev_mrr"] = dev_metrics["mrr"]
             if dev_metrics["mrr"] > best_dev_mrr:
                 best_dev_mrr = dev_metrics["mrr"]
@@ -704,18 +1206,35 @@ def train_neural_mira(
     train_neural = neural_scores(model, train_features, mean, std, device)
     test_neural = neural_scores(model, test_features, mean, std, device)
 
-    calibration, train_calibrated, test_calibrated = calibrate_scores(
-        [train_examples[index] for index in dev_indices],
-        train_examples,
-        test_examples,
-        memories,
-        train_neural[dev_indices],
-        train_neural,
-        test_neural,
-        {name: values[dev_indices] for name, values in train_components.items()},
-        train_components,
-        test_components,
-    )
+    if train_candidate_indices is None:
+        calibration, train_calibrated, test_calibrated = calibrate_scores(
+            [train_examples[index] for index in dev_indices],
+            train_examples,
+            test_examples,
+            memories,
+            train_neural[dev_indices],
+            train_neural,
+            test_neural,
+            {name: values[dev_indices] for name, values in train_components.items()},
+            train_components,
+            test_components,
+        )
+    else:
+        calibration, train_calibrated, test_calibrated = calibrate_candidate_scores(
+            [train_examples[index] for index in dev_indices],
+            train_examples,
+            test_examples,
+            memories,
+            train_neural[dev_indices],
+            train_neural,
+            test_neural,
+            {name: values[dev_indices] for name, values in train_components.items()},
+            train_components,
+            test_components,
+            train_candidate_indices[dev_indices],
+            train_candidate_indices,
+            test_candidate_indices,
+        )
 
     payload = {
         "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
@@ -733,6 +1252,10 @@ def normalize_component(values: np.ndarray) -> np.ndarray:
     for row in values:
         rows.append(minmax(row))
     return np.asarray(rows, dtype=np.float32)
+
+
+def candidate_component_scores(component_scores: np.ndarray, candidate_indices: np.ndarray) -> np.ndarray:
+    return np.take_along_axis(component_scores, candidate_indices, axis=1).astype(np.float32)
 
 
 def calibrate_scores(
@@ -795,6 +1318,76 @@ def calibrate_scores(
     return best_weights, train_scores, test_scores
 
 
+def calibrate_candidate_scores(
+    calibration_examples: list[EvalExample],
+    train_examples: list[EvalExample],
+    test_examples: list[EvalExample],
+    memories: list[DiaryMemory],
+    calibration_neural: np.ndarray,
+    train_neural: np.ndarray,
+    test_neural: np.ndarray,
+    calibration_components: dict[str, np.ndarray],
+    train_components: dict[str, np.ndarray],
+    test_components: dict[str, np.ndarray],
+    calibration_candidate_indices: np.ndarray,
+    train_candidate_indices: np.ndarray,
+    test_candidate_indices: np.ndarray,
+) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    components_calibration = {
+        "neural": normalize_component(calibration_neural),
+        "bm25": normalize_component(candidate_component_scores(calibration_components["bm25"], calibration_candidate_indices)),
+        "semantic": normalize_component(candidate_component_scores(calibration_components["semantic_embed"], calibration_candidate_indices)),
+        "scalar": normalize_component(candidate_component_scores(calibration_components["scalar_htema"], calibration_candidate_indices)),
+    }
+    components_train = {
+        "neural": normalize_component(train_neural),
+        "bm25": normalize_component(candidate_component_scores(train_components["bm25"], train_candidate_indices)),
+        "semantic": normalize_component(candidate_component_scores(train_components["semantic_embed"], train_candidate_indices)),
+        "scalar": normalize_component(candidate_component_scores(train_components["scalar_htema"], train_candidate_indices)),
+    }
+    components_test = {
+        "neural": normalize_component(test_neural),
+        "bm25": normalize_component(candidate_component_scores(test_components["bm25"], test_candidate_indices)),
+        "semantic": normalize_component(candidate_component_scores(test_components["semantic_embed"], test_candidate_indices)),
+        "scalar": normalize_component(candidate_component_scores(test_components["scalar_htema"], test_candidate_indices)),
+    }
+
+    best_weights = {"neural": 1.0, "bm25": 0.0, "semantic": 0.0, "scalar": 0.0}
+    best_mrr = -1.0
+    grid = [0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.35]
+    for neural_w in [0.0, 0.4, 0.6, 0.85, 1.0, 1.25, 1.6, 2.0]:
+        for bm25_w in grid:
+            for semantic_w in [0.0, 0.1, 0.2, 0.35]:
+                for scalar_w in grid:
+                    if neural_w + bm25_w + semantic_w + scalar_w <= 0:
+                        continue
+                    scores = (
+                        neural_w * components_calibration["neural"]
+                        + bm25_w * components_calibration["bm25"]
+                        + semantic_w * components_calibration["semantic"]
+                        + scalar_w * components_calibration["scalar"]
+                    )
+                    metrics = rank_metrics_candidates(
+                        calibration_examples,
+                        memories,
+                        scores,
+                        calibration_candidate_indices,
+                    )
+                    if metrics["mrr"] > best_mrr:
+                        best_mrr = metrics["mrr"]
+                        best_weights = {
+                            "neural": neural_w,
+                            "bm25": bm25_w,
+                            "semantic": semantic_w,
+                            "scalar": scalar_w,
+                        }
+
+    train_scores = sum(best_weights[name] * components_train[name] for name in best_weights)
+    test_scores = sum(best_weights[name] * components_test[name] for name in best_weights)
+    best_weights["dev_calibration_mrr"] = best_mrr
+    return best_weights, train_scores, test_scores
+
+
 def run_split(
     memories: list[DiaryMemory],
     examples: list[EvalExample],
@@ -808,8 +1401,28 @@ def run_split(
 
     bm25 = BM25Index([memory.tokens for memory in memories])
     semantic = SemanticLsaIndex([memory.text for memory in memories])
-    train_features, train_components, feature_names = build_pair_features(train_examples, memories, bm25, semantic)
-    test_features, test_components, _ = build_pair_features(test_examples, memories, bm25, semantic)
+    train_candidate_indices = None
+    test_candidate_indices = None
+    if args.candidate_top_k > 0:
+        train_features, train_components, feature_names, train_candidate_indices = build_candidate_pair_features(
+            train_examples,
+            memories,
+            bm25,
+            semantic,
+            args.candidate_top_k,
+            include_positives=True,
+        )
+        test_features, test_components, _, test_candidate_indices = build_candidate_pair_features(
+            test_examples,
+            memories,
+            bm25,
+            semantic,
+            args.candidate_top_k,
+            include_positives=False,
+        )
+    else:
+        train_features, train_components, feature_names = build_pair_features(train_examples, memories, bm25, semantic)
+        test_features, test_components, _ = build_pair_features(test_examples, memories, bm25, semantic)
 
     train_baselines = evaluate_score_map(train_examples, memories, train_components)
     test_baselines = evaluate_score_map(test_examples, memories, test_components)
@@ -821,6 +1434,8 @@ def run_split(
         test_features,
         train_components,
         test_components,
+        train_candidate_indices,
+        test_candidate_indices,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -829,11 +1444,19 @@ def run_split(
     )
     train_metrics = {
         **train_baselines,
-        "neural_mira": rank_metrics(train_examples, memories, train_neural),
+        "neural_mira": (
+            rank_metrics_candidates(train_examples, memories, train_neural, train_candidate_indices)
+            if train_candidate_indices is not None
+            else rank_metrics(train_examples, memories, train_neural)
+        ),
     }
     test_metrics = {
         **test_baselines,
-        "neural_mira": rank_metrics(test_examples, memories, test_neural),
+        "neural_mira": (
+            rank_metrics_candidates(test_examples, memories, test_neural, test_candidate_indices)
+            if test_candidate_indices is not None
+            else rank_metrics(test_examples, memories, test_neural)
+        ),
     }
 
     return {
@@ -841,6 +1464,7 @@ def run_split(
         "train_examples": len(train_examples),
         "test_examples": len(test_examples),
         "feature_names": feature_names,
+        "candidate_top_k": args.candidate_top_k,
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "model": model_payload,
@@ -857,11 +1481,17 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         "- Query text is the only input at retrieval time.",
         "- `positive_window` is not used.",
         "- Positive target dates are used only as labels for training/evaluation.",
-        "- BM25 and dense semantic embedding baselines run over the same diary day tokens.",
+        "- BM25 and dense semantic embedding baselines run over the same memory tokens.",
+        "- Neural MIRA is evaluated as a candidate reranker when `candidate_top_k` is greater than zero.",
         "",
         f"Generated at: {payload['created_at']}",
-        f"Diary day tokens: {payload['memory_count']}",
+        f"Memory tokens: {payload['memory_count']}",
+        f"Diary tokens: {payload.get('diary_count', 'n/a')}",
+        f"WhatsApp tokens: {payload.get('whatsapp_count', 'n/a')}",
         f"Deterministic benchmark queries: {payload['example_count']}",
+        f"Total generated benchmark queries before cap: {payload.get('total_example_count', payload['example_count'])}",
+        f"Extra augmented queries loaded: {payload.get('extra_example_count', 0)}",
+        f"Candidate top-k for neural reranking: {payload.get('candidate_top_k', 0) or 'full corpus'}",
         "",
     ]
 
@@ -879,6 +1509,18 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
                     r1=metrics["recall_at_1"],
                     r5=metrics["recall_at_5"],
                     mrr=metrics["mrr"],
+                )
+            )
+        lines.append("")
+        lines.append("| Model | Diary MRR | WhatsApp MRR | Mixed MRR |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for name, metrics in split_result["test_metrics"].items():
+            lines.append(
+                "| {name} | {diary:.3f} | {whatsapp:.3f} | {mixed:.3f} |".format(
+                    name=name,
+                    diary=metrics.get("mrr_source/diary", 0.0),
+                    whatsapp=metrics.get("mrr_source/whatsapp", 0.0),
+                    mixed=metrics.get("mrr_source/mixed", 0.0),
                 )
             )
         lines.append("")
@@ -903,9 +1545,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--lr", type=float, default=8e-4)
     parser.add_argument("--test-ratio", type=float, default=0.22)
+    parser.add_argument(
+        "--max-examples",
+        type=int,
+        default=1800,
+        help="Stratified benchmark cap. Use 0 to run every generated example, which can be very large with WhatsApp.",
+    )
+    parser.add_argument(
+        "--candidate-top-k",
+        type=int,
+        default=768,
+        help="Candidate pool size for neural reranking. Use 0 for full-corpus neural scoring.",
+    )
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-save-model", action="store_true")
+    parser.add_argument(
+        "--extra-examples",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional JSONL query examples, such as data/style_augmented_queries.jsonl.",
+    )
     return parser.parse_args()
 
 
@@ -925,12 +1586,22 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    memories = parse_diary_memories()
+    memories = parse_all_memories()
     if not memories:
-        raise SystemExit("No diary memories found.")
-    examples = generate_benchmark(memories, args.seed)
+        raise SystemExit("No memories found (diary + whatsapp).")
+    diary_count = sum(1 for m in memories if getattr(m, "source_type", "diary") == "diary")
+    whatsapp_count = len(memories) - diary_count
+    print(f"Loaded {len(memories)} memories ({diary_count} diary, {whatsapp_count} whatsapp)")
+    all_examples = generate_benchmark(memories, args.seed)
+    extra_examples = load_augmented_examples(args.extra_examples, memories) if args.extra_examples else []
+    if extra_examples:
+        all_examples = merge_examples(all_examples, extra_examples)
+        print(f"Loaded {len(extra_examples)} extra augmented examples")
+    examples = stratified_limit_examples(all_examples, args.max_examples, args.seed)
     if not examples:
         raise SystemExit("No benchmark examples could be generated.")
+    if len(examples) != len(all_examples):
+        print(f"Using {len(examples)} stratified examples from {len(all_examples)} generated examples")
 
     splits = ["random", "month_holdout", "style_holdout"] if args.split == "all" else [args.split]
     split_results = []
@@ -954,7 +1625,14 @@ def main() -> int:
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "duration_seconds": round(time.time() - start, 2),
         "memory_count": len(memories),
+        "diary_count": diary_count,
+        "whatsapp_count": whatsapp_count,
         "example_count": len(examples),
+        "total_example_count": len(all_examples),
+        "extra_example_count": len(extra_examples),
+        "extra_example_paths": [str(path) for path in args.extra_examples],
+        "max_examples": args.max_examples,
+        "candidate_top_k": args.candidate_top_k,
         "seed": args.seed,
         "splits": [
             {

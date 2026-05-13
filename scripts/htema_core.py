@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -13,6 +14,7 @@ from typing import Any
 LAB_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = LAB_ROOT.parent
 DIARY_ROOT = REPO_ROOT / "knowledge_base" / "Deniz" / "diary"
+WHATSAPP_ROOT = REPO_ROOT / "knowledge_base" / "chunks-manager" / "whatsapp-chunks"
 
 DIARY_FILES = [
     DIARY_ROOT / "dailybean_2023_complete.md",
@@ -169,6 +171,8 @@ class DiaryMemory:
     diary_features: dict[str, float]
     importance: float
     unresolved: float
+    source_type: str = "diary"
+    participants: tuple[str, ...] = ()
 
 
 @dataclass
@@ -330,9 +334,217 @@ def parse_diary_memories(files: list[Path] | None = None) -> list[DiaryMemory]:
                     diary_features=diary_feature_vector(part, icons),
                     importance=memory_importance(mood, icons, part),
                     unresolved=unresolved_score(part, icons),
+                    source_type="diary",
+                    participants=(),
                 )
             )
     return sorted(memories, key=lambda item: item.ordinal)
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp conversation memory parsing
+# ---------------------------------------------------------------------------
+
+_WHATSAPP_MSG_RE = re.compile(
+    r"^\[?(?:\u200e|\u200f)*(\d{4})\.\s*(\d{2})\.\s*(\d{2})\.,\s*"
+    r"(\d{1,2}):(\d{2}):(\d{2})\]\s+([^:]+):\s?(.*)",
+    re.UNICODE,
+)
+
+
+@dataclass
+class _WhatsAppMessage:
+    date: str
+    timestamp_ms: int
+    sender: str
+    raw: str
+
+
+def _parse_whatsapp_file(text: str) -> list[_WhatsAppMessage]:
+    """Parse raw WhatsApp export text into individual messages."""
+    messages: list[_WhatsAppMessage] = []
+    current: _WhatsAppMessage | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current and current.raw.strip():
+            messages.append(current)
+        current = None
+
+    for line in text.split("\n"):
+        cleaned = line.lstrip("\u200e\u200f")
+        match = _WHATSAPP_MSG_RE.match(cleaned)
+        if match:
+            finish()
+            year, month, day = match.group(1), match.group(2), match.group(3)
+            hour, minute, second = match.group(4), match.group(5), match.group(6)
+            sender = match.group(7).strip()
+            body = match.group(8)
+            ts = int(datetime(
+                int(year), int(month), int(day),
+                int(hour), int(minute), int(second),
+            ).timestamp() * 1000)
+            current = _WhatsAppMessage(
+                date=f"{year}-{month}-{day}",
+                timestamp_ms=ts,
+                sender=sender,
+                raw=f"[{year}. {month}. {day}., {hour.zfill(2)}:{minute}:{second}] {sender}: {body}",
+            )
+        elif current:
+            current.raw += f"\n{line}"
+
+    finish()
+    return messages
+
+
+def _group_conversation_windows(
+    messages: list[_WhatsAppMessage],
+    max_gap_ms: int = 2 * 60 * 60 * 1000,
+    max_chars: int = 2200,
+) -> list[list[_WhatsAppMessage]]:
+    """Group messages into conversation windows by date change, time gap, or size."""
+    if not messages:
+        return []
+    windows: list[list[_WhatsAppMessage]] = []
+    current: list[_WhatsAppMessage] = []
+
+    def current_length(extra: str = "") -> int:
+        return sum(len(m.raw) + 1 for m in current) + len(extra)
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            windows.append(current)
+        current = []
+
+    for msg in messages:
+        prev = current[-1] if current else None
+        if prev:
+            gap = msg.timestamp_ms - prev.timestamp_ms
+            date_changed = msg.date != prev.date
+            too_large = current_length(msg.raw) > max_chars
+            if date_changed or gap > max_gap_ms or too_large:
+                flush()
+        current.append(msg)
+
+    flush()
+    return windows
+
+
+def _chat_name_from_path(folder_name: str) -> str:
+    """Extract a clean chat identifier from the folder name."""
+    # Folder names look like: "Deniz Yunus Göğüş ✨-Notlarım" or "Böbrek (Hüso)-Deniz Yunus Göğüş ✨"
+    parts = folder_name.split("-")
+    # Remove Deniz's own name to get the other participant
+    other = [p.strip() for p in parts if "deniz" not in p.strip().lower() and "göğüş" not in p.strip().lower()]
+    return other[0] if other else folder_name
+
+
+def _infer_whatsapp_mood(text: str) -> int | None:
+    """Rough mood inference from WhatsApp text using emotion terms."""
+    lowered = text.lower()
+    positive = sum(1 for t in ["haha", "😂", "😁", "❤", "güzel", "süper", "harika", "iyi", "mutlu", "eğlen", "keyif"]
+                   if t in lowered)
+    negative = sum(1 for t in ["üzgün", "kötü", "sinir", "kavga", "problem", "stres", "yorgun", "ağla"]
+                   if t in lowered)
+    if positive >= 3 and negative == 0:
+        return 4
+    if negative >= 2 and positive == 0:
+        return 2
+    return None  # Unknown mood — this is fine, MIRA handles None mood
+
+
+def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> list[DiaryMemory]:
+    """Parse all WhatsApp chunk files into DiaryMemory objects (conversation windows).
+
+    Args:
+        root: Path to the whatsapp-chunks directory.
+        min_chars: Minimum combined text length for a conversation window.
+                   Windows shorter than this are filtered as noise.
+    """
+    root = root or WHATSAPP_ROOT
+    if not root.exists():
+        return []
+
+    memories: list[DiaryMemory] = []
+    seen_ids: set[str] = set()
+
+    for chat_dir in sorted(root.iterdir()):
+        if not chat_dir.is_dir() or chat_dir.name.startswith("."):
+            continue
+
+        chat_name = _chat_name_from_path(chat_dir.name)
+        txt_files = sorted(chat_dir.glob("*.txt"))
+
+        for txt_file in txt_files:
+            try:
+                raw = txt_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            messages = _parse_whatsapp_file(raw)
+            if len(messages) < 2:
+                continue
+
+            windows = _group_conversation_windows(messages)
+            for window in windows:
+                first = window[0]
+                last = window[-1]
+                combined_text = "\n".join(m.raw for m in window)
+                if len(combined_text) < min_chars:
+                    continue
+                window_date = normalize_date(first.date)
+                if not window_date:
+                    continue
+
+                participants_set = {m.sender for m in window}
+                content_hash = hashlib.sha1(combined_text.encode("utf-8")).hexdigest()[:12]
+                entry_id = f"whatsapp:{chat_name}:{window_date}:{content_hash}"
+                dedup_key = f"{chat_name}:{window_date}:{content_hash}"
+                if dedup_key in seen_ids:
+                    continue
+                seen_ids.add(dedup_key)
+
+                tokens = tuple(tokenize(combined_text))
+                year, month, _ = (int(v) for v in window_date.split("-"))
+                mood = _infer_whatsapp_mood(combined_text)
+                icons_tuple: tuple[str, ...] = ()
+                rel_path = str(txt_file.relative_to(REPO_ROOT))
+
+                memories.append(
+                    DiaryMemory(
+                        entry_id=entry_id,
+                        date=window_date,
+                        ordinal=ordinal(window_date),
+                        year=year,
+                        month=month,
+                        source_path=rel_path,
+                        mood=mood,
+                        icons=icons_tuple,
+                        text=combined_text,
+                        tokens=tokens,
+                        token_vector=vectorize(tokens),
+                        emotion=emotion_vector(mood, icons_tuple, combined_text),
+                        diary_features=diary_feature_vector(combined_text),
+                        importance=memory_importance(mood, icons_tuple, combined_text),
+                        unresolved=unresolved_score(combined_text, icons_tuple),
+                        source_type="whatsapp",
+                        participants=tuple(sorted(participants_set)),
+                    )
+                )
+
+    return sorted(memories, key=lambda item: item.ordinal)
+
+
+def parse_all_memories(
+    diary_files: list[Path] | None = None,
+    whatsapp_root: Path | None = None,
+) -> list[DiaryMemory]:
+    """Load diary AND WhatsApp memories into a unified sorted list."""
+    diary = parse_diary_memories(diary_files)
+    whatsapp = parse_whatsapp_memories(whatsapp_root)
+    combined = diary + whatsapp
+    return sorted(combined, key=lambda item: item.ordinal)
 
 
 def parse_time_window(query: str) -> tuple[str, str] | None:
