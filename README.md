@@ -254,10 +254,53 @@ The generated aggregate report is stored at:
 docs/honest_evaluation_report.md
 ```
 
-The trained neural MIRA artifact is ignored by git because it is diary-derived:
+Gate the latest metrics against conservative hardening thresholds:
+
+```bash
+npm run eval:gate
+```
+
+Use this after retraining so random, month-holdout, and style-holdout regressions
+are caught before a checkpoint becomes the active Jarvis model.
+
+## Feedback-Derived Eval Cases
+
+Jarvis stores answer feedback locally in:
 
 ```text
+../jarvis-platform/data/feedback.jsonl
+```
+
+The converter from feedback to MIRA eval examples is not implemented yet. Add it
+after enough real feedback exists, ideally 30-50 `wrong` / `needs_work` rows with
+clear correction notes.
+
+Target output format:
+
+```json
+{"query":"natural user question","positive_ids":["memory-id"],"style":"real_feedback","source":"jarvis_feedback","note":"why this was corrected"}
+```
+
+Those rows can then be reviewed and passed into `honest_mira.py` with
+`--extra-examples`. Do not auto-label feedback only from the originally retrieved
+sources; that can preserve the exact retrieval mistake the feedback was meant to
+fix.
+
+Private `.pt` artifacts are tracked in this private repo with Git LFS so the
+model can continue training/generalizing from the latest checkpoint:
+
+```text
+data/neural_embeddings.pt
+data/neural_htema_model.pt
 data/neural_mira_model.pt
+```
+
+These files are not intended to contain raw diary or chat text, but they are
+still private-derived model state. Keep them inside the private repo boundary.
+
+Generated metric JSON remains local:
+
+```text
 data/neural_mira_metrics.json
 ```
 
