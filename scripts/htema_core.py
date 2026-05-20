@@ -23,30 +23,62 @@ DIARY_FILES = [
 ]
 
 MONTHS = {
-    "january": 1,
-    "jan": 1,
-    "february": 2,
-    "feb": 2,
-    "march": 3,
-    "mar": 3,
-    "april": 4,
-    "apr": 4,
+    # English
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
     "may": 5,
-    "june": 6,
-    "jun": 6,
-    "july": 7,
-    "jul": 7,
-    "august": 8,
-    "aug": 8,
-    "september": 9,
-    "sep": 9,
-    "october": 10,
-    "oct": 10,
-    "november": 11,
-    "nov": 11,
-    "december": 12,
-    "dec": 12,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+    # Turkish
+    "ocak": 1,
+    "şubat": 2, "subat": 2,
+    "mart": 3,
+    "nisan": 4,
+    "mayıs": 5, "mayis": 5,
+    "haziran": 6,
+    "temmuz": 7,
+    "ağustos": 8, "agustos": 8,
+    "eylül": 9, "eylul": 9,
+    "ekim": 10,
+    "kasım": 11, "kasim": 11,
+    "aralık": 12, "aralik": 12,
 }
+
+# Seasons (Northern Hemisphere) and Turkish equivalents.
+# Each entry: (start_month, end_month).
+SEASONS = {
+    "spring": (3, 5), "ilkbahar": (3, 5), "bahar": (3, 5),
+    "summer": (6, 8), "yaz": (6, 8),
+    "autumn": (9, 11), "fall": (9, 11), "sonbahar": (9, 11), "güz": (9, 11), "guz": (9, 11),
+    "winter": (12, 2), "kış": (12, 2), "kis": (12, 2),
+}
+
+# Relative phrases — resolved against parse_time_window's `now` reference.
+RELATIVE_PHRASES_EN = [
+    "today", "yesterday", "tomorrow",
+    "this week", "last week", "next week",
+    "this month", "last month", "next month",
+    "this year", "last year", "next year",
+    "this summer", "last summer", "next summer",
+    "this winter", "last winter", "next winter",
+    "this spring", "last spring", "next spring",
+    "this autumn", "last autumn", "this fall", "last fall",
+]
+RELATIVE_PHRASES_TR = [
+    "bugün", "bugun", "dün", "dun", "yarın", "yarin",
+    "bu hafta", "geçen hafta", "gecen hafta",
+    "bu ay", "geçen ay", "gecen ay",
+    "bu yıl", "bu yil", "bu sene", "geçen yıl", "gecen yil", "geçen sene", "gecen sene",
+    "bu yaz", "geçen yaz", "gecen yaz",
+    "bu kış", "bu kis", "geçen kış", "gecen kis",
+]
 
 STOPWORDS = {
     "a",
@@ -539,36 +571,465 @@ def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> l
 def parse_all_memories(
     diary_files: list[Path] | None = None,
     whatsapp_root: Path | None = None,
+    *,
+    include_rollups: bool = False,
+    include_atoms: bool = False,
+    rollup_max_text: int = 1800,
+    atom_min_chars: int = 80,
+    atom_max_chars: int = 700,
 ) -> list[DiaryMemory]:
-    """Load diary AND WhatsApp memories into a unified sorted list."""
+    """Load diary AND WhatsApp memories into a unified sorted list.
+
+    When `include_rollups` is True, append synthetic week/month rollup tokens
+    that aggregate child diary days. When `include_atoms` is True, append
+    paragraph-level memory atoms split out of long diary days. Both kinds carry
+    distinct `source_type` values so the source-feature head can attend to them.
+    """
     diary = parse_diary_memories(diary_files)
     whatsapp = parse_whatsapp_memories(whatsapp_root)
     combined = diary + whatsapp
-    return sorted(combined, key=lambda item: item.ordinal)
+    extras: list[DiaryMemory] = []
+    if include_atoms:
+        extras.extend(build_memory_atoms(diary, min_chars=atom_min_chars, max_chars=atom_max_chars))
+    if include_rollups:
+        extras.extend(build_rollup_memories(diary, max_text=rollup_max_text))
+    return sorted(combined + extras, key=lambda item: item.ordinal)
 
 
-def parse_time_window(query: str) -> tuple[str, str] | None:
+# ---------------------------------------------------------------------------
+# Hierarchy: week / month rollups
+# ---------------------------------------------------------------------------
+
+
+def _iso_week_key(memory: DiaryMemory) -> tuple[int, int]:
+    iso = date.fromisoformat(memory.date).isocalendar()
+    return iso.year, iso.week
+
+
+def _summarize_icons(memories: list[DiaryMemory], top_n: int = 12) -> tuple[str, ...]:
+    counter: dict[str, int] = {}
+    for memory in memories:
+        for icon in memory.icons:
+            counter[icon] = counter.get(icon, 0) + 1
+    ranked = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return tuple(name for name, _ in ranked[:top_n])
+
+
+def _summarize_text(memories: list[DiaryMemory], max_chars: int) -> str:
+    lines: list[str] = []
+    for memory in memories:
+        excerpt = re.sub(r"^###\s+", "", memory.text.strip().split("\n", 1)[0])
+        lines.append(f"- {memory.date}: {excerpt}")
+        body = " ".join(memory.text.split())
+        if len(body) > 220:
+            body = body[:220].rstrip() + "..."
+        lines.append(f"  {body}")
+    joined = "\n".join(lines)
+    if len(joined) <= max_chars:
+        return joined
+    return joined[: max_chars - 16].rstrip() + "\n[truncated...]"
+
+
+def _aggregate_emotion(memories: list[DiaryMemory]) -> dict[str, float | int | None]:
+    valences = [float(m.emotion.get("valence") or 0.0) for m in memories]
+    arousals = [float(m.emotion.get("arousal") or 0.0) for m in memories]
+    moods = [m.mood for m in memories if m.mood is not None]
+    return {
+        "valence": float(sum(valences) / max(len(valences), 1)),
+        "arousal": float(sum(arousals) / max(len(arousals), 1)),
+        "mood": int(round(sum(moods) / len(moods))) if moods else None,
+    }
+
+
+def _aggregate_diary_features(memories: list[DiaryMemory]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for name in DIARY_FEATURES:
+        values = [memory.diary_features.get(name, 0.0) for memory in memories]
+        out[name] = float(sum(values) / max(len(values), 1))
+    return out
+
+
+def _aggregate_importance(memories: list[DiaryMemory]) -> float:
+    if not memories:
+        return 0.0
+    return clamp(max(m.importance for m in memories) * 0.7 + (sum(m.importance for m in memories) / len(memories)) * 0.3)
+
+
+def _build_rollup(
+    *,
+    entry_id: str,
+    label: str,
+    start_iso: str,
+    end_iso: str,
+    children: list[DiaryMemory],
+    source_type: str,
+    max_text: int,
+) -> DiaryMemory:
+    text_block = f"### {label} ({start_iso} to {end_iso})\n" + _summarize_text(children, max_text)
+    tokens = tuple(tokenize(text_block))
+    icons = _summarize_icons(children)
+    emotion = _aggregate_emotion(children)
+    mood = emotion["mood"] if isinstance(emotion["mood"], int) else None
+    importance = _aggregate_importance(children)
+    middle_ordinal = ordinal(start_iso) + (ordinal(end_iso) - ordinal(start_iso)) // 2
+    middle_iso = date.fromordinal(middle_ordinal).isoformat()
+    middle_year, middle_month, _ = (int(part) for part in middle_iso.split("-"))
+    return DiaryMemory(
+        entry_id=entry_id,
+        date=middle_iso,
+        ordinal=middle_ordinal,
+        year=middle_year,
+        month=middle_month,
+        source_path=children[0].source_path if children else "rollup",
+        mood=mood,
+        icons=icons,
+        text=text_block,
+        tokens=tokens,
+        token_vector=vectorize(tokens),
+        emotion=emotion,
+        diary_features=_aggregate_diary_features(children),
+        importance=float(importance),
+        unresolved=float(clamp(sum(m.unresolved for m in children) / max(len(children), 1))),
+        source_type=source_type,
+        participants=(),
+    )
+
+
+def build_rollup_memories(
+    diary: list[DiaryMemory],
+    max_text: int = 1800,
+    min_children: int = 2,
+) -> list[DiaryMemory]:
+    """Group diary days into week and month rollup tokens.
+
+    WhatsApp windows are intentionally excluded: WhatsApp days don't represent
+    Deniz's first-person account, and rolling them up would dilute the diary
+    narrative signal that makes these tokens useful.
+    """
+    weekly: dict[tuple[int, int], list[DiaryMemory]] = {}
+    monthly: dict[tuple[int, int], list[DiaryMemory]] = {}
+    for memory in diary:
+        weekly.setdefault(_iso_week_key(memory), []).append(memory)
+        monthly.setdefault((memory.year, memory.month), []).append(memory)
+
+    rollups: list[DiaryMemory] = []
+    for (iso_year, iso_week), children in sorted(weekly.items()):
+        if len(children) < min_children:
+            continue
+        children.sort(key=lambda m: m.ordinal)
+        start_iso = children[0].date
+        end_iso = children[-1].date
+        rollups.append(_build_rollup(
+            entry_id=f"rollup:week:{iso_year}-W{iso_week:02d}",
+            label=f"Week {iso_year}-W{iso_week:02d}",
+            start_iso=start_iso,
+            end_iso=end_iso,
+            children=children,
+            source_type="rollup_week",
+            max_text=max_text,
+        ))
+
+    for (year, month), children in sorted(monthly.items()):
+        if len(children) < min_children:
+            continue
+        children.sort(key=lambda m: m.ordinal)
+        start_iso = _date_str(year, month, 1)
+        end_iso = _date_str(year, month, days_in_month(year, month))
+        rollups.append(_build_rollup(
+            entry_id=f"rollup:month:{year}-{month:02d}",
+            label=f"{year}-{month:02d}",
+            start_iso=start_iso,
+            end_iso=end_iso,
+            children=children,
+            source_type="rollup_month",
+            max_text=max_text,
+        ))
+    return rollups
+
+
+# ---------------------------------------------------------------------------
+# Memory atoms: paragraph-level slices of long diary days
+# ---------------------------------------------------------------------------
+
+
+def _split_into_atoms(body: str, min_chars: int, max_chars: int) -> list[str]:
+    if not body or not body.strip():
+        return []
+    # First try paragraph splits; fall back to sentence splits inside oversized chunks.
+    paragraphs = [block.strip() for block in re.split(r"\n\s*\n+", body) if block.strip()]
+    chunks: list[str] = []
+    for block in paragraphs:
+        if len(block) <= max_chars:
+            chunks.append(block)
+            continue
+        sentences = re.split(r"(?<=[\.\!\?...])\s+(?=[A-ZÇŞĞÜÖİ\"„'])", block)
+        bucket = ""
+        for sentence in sentences:
+            if not sentence:
+                continue
+            if len(bucket) + len(sentence) + 1 > max_chars and bucket:
+                chunks.append(bucket.strip())
+                bucket = sentence
+            else:
+                bucket = f"{bucket} {sentence}".strip()
+        if bucket:
+            chunks.append(bucket.strip())
+    return [chunk for chunk in chunks if len(chunk) >= min_chars]
+
+
+def build_memory_atoms(
+    diary: list[DiaryMemory],
+    min_chars: int = 80,
+    max_chars: int = 700,
+    parents_only_above: int = 800,
+) -> list[DiaryMemory]:
+    """Split long diary days into smaller atoms.
+
+    The parent day stays in the corpus; atoms are appended for retrieval
+    granularity. We only fragment days whose body is longer than
+    `parents_only_above` to avoid creating noise from short entries.
+    """
+    atoms: list[DiaryMemory] = []
+    for parent in diary:
+        body = parent.text
+        # Strip the date header line so atoms don't all share the same prefix.
+        body_stripped = re.sub(r"^###\s+\S+.*?\n", "", body, count=1).strip()
+        if len(body_stripped) < parents_only_above:
+            continue
+        slices = _split_into_atoms(body_stripped, min_chars, max_chars)
+        if len(slices) < 2:
+            continue
+        for idx, slice_text in enumerate(slices):
+            slice_full = f"### {parent.date} atom {idx + 1}/{len(slices)}\n{slice_text}"
+            tokens = tuple(tokenize(slice_full))
+            atoms.append(DiaryMemory(
+                entry_id=f"atom:{parent.entry_id}:{idx:02d}",
+                date=parent.date,
+                ordinal=parent.ordinal,
+                year=parent.year,
+                month=parent.month,
+                source_path=parent.source_path,
+                mood=parent.mood,
+                icons=parent.icons,
+                text=slice_full,
+                tokens=tokens,
+                token_vector=vectorize(tokens),
+                emotion=emotion_vector(parent.mood, parent.icons, slice_full),
+                diary_features=diary_feature_vector(slice_full, parent.icons),
+                importance=memory_importance(parent.mood, parent.icons, slice_full),
+                unresolved=unresolved_score(slice_full, parent.icons),
+                source_type="atom",
+                participants=parent.participants,
+            ))
+    return atoms
+
+
+# ---------------------------------------------------------------------------
+# Reflections: optionally load Level-5 identity patterns from disk
+# ---------------------------------------------------------------------------
+
+
+REFLECTIONS_DEFAULT = LAB_ROOT / "data" / "reflections.jsonl"
+
+
+def load_reflections(path: Path | None = None) -> list[DiaryMemory]:
+    path = path or REFLECTIONS_DEFAULT
+    if not path.exists():
+        return []
+    out: list[DiaryMemory] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        try:
+            start_iso = str(row["start"])
+            end_iso = str(row["end"])
+            label = str(row.get("label") or row.get("title") or "Reflection")
+            kind = str(row.get("kind") or "pattern")
+            text_body = str(row.get("text") or row.get("body") or label)
+            mood = row.get("mood")
+            icons_tuple = tuple(str(item) for item in row.get("icons") or [])
+        except KeyError:
+            continue
+        text_block = f"### Reflection: {label} ({start_iso} to {end_iso})\n{text_body}"
+        tokens = tuple(tokenize(text_block))
+        middle_ordinal = (ordinal(start_iso) + ordinal(end_iso)) // 2
+        middle_iso = date.fromordinal(middle_ordinal).isoformat()
+        middle_year, middle_month, _ = (int(part) for part in middle_iso.split("-"))
+        out.append(DiaryMemory(
+            entry_id=str(row.get("id") or f"reflection:{kind}:{start_iso}:{end_iso}"),
+            date=middle_iso,
+            ordinal=middle_ordinal,
+            year=middle_year,
+            month=middle_month,
+            source_path="reflections",
+            mood=int(mood) if isinstance(mood, (int, float)) else None,
+            icons=icons_tuple,
+            text=text_block,
+            tokens=tokens,
+            token_vector=vectorize(tokens),
+            emotion=emotion_vector(int(mood) if isinstance(mood, (int, float)) else None, icons_tuple, text_block),
+            diary_features=diary_feature_vector(text_block, icons_tuple),
+            importance=float(row.get("importance") or 0.7),
+            unresolved=float(row.get("unresolved") or 0.0),
+            source_type="reflection",
+            participants=tuple(sorted(str(item) for item in row.get("participants") or [])),
+        ))
+    return out
+
+
+def _date_str(year: int, month: int, day: int) -> str:
+    return f"{year}-{month:02d}-{day:02d}"
+
+
+def _month_window(year: int, month: int) -> tuple[str, str]:
+    return _date_str(year, month, 1), _date_str(year, month, days_in_month(year, month))
+
+
+def _season_window(year: int, start_month: int, end_month: int) -> tuple[str, str]:
+    if start_month <= end_month:
+        return _date_str(year, start_month, 1), _date_str(year, end_month, days_in_month(year, end_month))
+    # Winter wraps: Dec start_year -> Feb start_year+1
+    return _date_str(year, start_month, 1), _date_str(year + 1, end_month, days_in_month(year + 1, end_month))
+
+
+def parse_time_window(query: str, now: date | None = None) -> tuple[str, str] | None:
+    """Parse a natural-language time window from `query`.
+
+    Handles:
+      - Explicit YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD dates (single or range)
+      - "between A and B", "from A to B" with bare year/month parts
+      - English + Turkish month names with a year
+      - Seasons (spring/summer/autumn/winter, ilkbahar/yaz/sonbahar/kış) with a year
+      - Relative phrases: today, yesterday, this/last/next week|month|year|season (EN + TR)
+      - Phase words inside a year: early/late/start/end/beginning + erken/geç/başı/sonu/ortası
+      - Bare year fallback
+    """
+    now = now or date.today()
     lowered = query.lower()
-    explicit = [normalize_date(match.group(0)) for match in re.finditer(r"20\d{2}[./-]\d{1,2}[./-]\d{1,2}", lowered)]
-    explicit = [item for item in explicit if item]
+
+    # 1) Explicit dates (any count): take min..max if 2+ otherwise single day window.
+    explicit = []
+    for match in re.finditer(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})", lowered):
+        normalized = normalize_date(match.group(0))
+        if normalized:
+            explicit.append(normalized)
     if explicit:
-        return min(explicit), max(explicit)
+        if len(explicit) >= 2:
+            return min(explicit), max(explicit)
+        # Single explicit date: treat as that exact day.
+        return explicit[0], explicit[0]
 
-    year_match = re.search(r"\b(20\d{2})\b", lowered)
+    # 2) Relative phrases (resolved against `now`).
+    rel = _parse_relative_window(lowered, now)
+    if rel:
+        return rel
+
+    # 3) Year-anchored parses.
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", lowered)
     year = int(year_match.group(1)) if year_match else None
-    month_name = next((name for name in MONTHS if re.search(rf"\b{name}\b", lowered)), None)
-    if year and month_name:
-        month = MONTHS[month_name]
-        return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{days_in_month(year, month):02d}"
 
-    if year and re.search(r"\b(end|last)\b", lowered):
-        return f"{year}-12-01", f"{year}-12-31"
-    if year and re.search(r"\blate\b", lowered):
-        return f"{year}-10-01", f"{year}-12-31"
-    if year and re.search(r"\b(start|early|beginning)\b", lowered):
-        return f"{year}-01-01", f"{year}-03-31"
+    # 3a) Year + season.
     if year:
-        return f"{year}-01-01", f"{year}-12-31"
+        for name, (start_month, end_month) in SEASONS.items():
+            if re.search(rf"\b{re.escape(name)}\b", lowered):
+                return _season_window(year, start_month, end_month)
+
+    # 3b) Year + month name.
+    if year:
+        month_match = _find_month(lowered)
+        if month_match is not None:
+            return _month_window(year, month_match)
+
+    # 3c) Year + phase word (end/last/late/early/start/beginning + Turkish equivalents).
+    if year and re.search(r"\b(end|last|sonu|sonunda)\b", lowered):
+        return _date_str(year, 12, 1), _date_str(year, 12, 31)
+    if year and re.search(r"\b(late|geç|gec)\b", lowered):
+        return _date_str(year, 10, 1), _date_str(year, 12, 31)
+    if year and re.search(r"\b(early|start|beginning|başı|basi|başında|basinda)\b", lowered):
+        return _date_str(year, 1, 1), _date_str(year, 3, 31)
+    if year and re.search(r"\b(mid|middle|ortası|ortasi|ortasında|ortasinda)\b", lowered):
+        return _date_str(year, 5, 1), _date_str(year, 8, 31)
+    if year and re.search(r"\b(first half|ilk yarı|ilk yari)\b", lowered):
+        return _date_str(year, 1, 1), _date_str(year, 6, 30)
+    if year and re.search(r"\b(second half|ikinci yarı|ikinci yari)\b", lowered):
+        return _date_str(year, 7, 1), _date_str(year, 12, 31)
+
+    # 3d) Bare year.
+    if year:
+        return _date_str(year, 1, 1), _date_str(year, 12, 31)
+
+    # 4) Month name without year — assume the most recent such month relative to `now`.
+    month_match = _find_month(lowered)
+    if month_match is not None:
+        recent_year = now.year if month_match <= now.month else now.year - 1
+        return _month_window(recent_year, month_match)
+
+    # 5) Season without year — most recent occurrence relative to `now`.
+    for name, (start_month, end_month) in SEASONS.items():
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            anchor_year = now.year
+            # If we haven't reached this season yet, fall back to last year.
+            if start_month > now.month:
+                anchor_year -= 1
+            return _season_window(anchor_year, start_month, end_month)
+
+    return None
+
+
+def _find_month(lowered: str) -> int | None:
+    for name, month in MONTHS.items():
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            return month
+    return None
+
+
+def _parse_relative_window(lowered: str, now: date) -> tuple[str, str] | None:
+    # Single-day relatives.
+    if re.search(r"\btoday\b|\bbugün\b|\bbugun\b", lowered):
+        return now.isoformat(), now.isoformat()
+    if re.search(r"\byesterday\b|\bdün\b|\bdun\b", lowered):
+        d = date.fromordinal(now.toordinal() - 1)
+        return d.isoformat(), d.isoformat()
+    if re.search(r"\btomorrow\b|\byarın\b|\byarin\b", lowered):
+        d = date.fromordinal(now.toordinal() + 1)
+        return d.isoformat(), d.isoformat()
+
+    # Week.
+    if re.search(r"\bthis week\b|\bbu hafta\b", lowered):
+        start = date.fromordinal(now.toordinal() - now.weekday())
+        end = date.fromordinal(start.toordinal() + 6)
+        return start.isoformat(), end.isoformat()
+    if re.search(r"\blast week\b|\bgeçen hafta\b|\bgecen hafta\b", lowered):
+        start = date.fromordinal(now.toordinal() - now.weekday() - 7)
+        end = date.fromordinal(start.toordinal() + 6)
+        return start.isoformat(), end.isoformat()
+
+    # Month.
+    if re.search(r"\bthis month\b|\bbu ay\b", lowered):
+        return _month_window(now.year, now.month)
+    if re.search(r"\blast month\b|\bgeçen ay\b|\bgecen ay\b", lowered):
+        first_of_this = date(now.year, now.month, 1)
+        last_month_end = date.fromordinal(first_of_this.toordinal() - 1)
+        return _month_window(last_month_end.year, last_month_end.month)
+
+    # Year.
+    if re.search(r"\bthis year\b|\bbu yıl\b|\bbu yil\b|\bbu sene\b", lowered):
+        return _date_str(now.year, 1, 1), _date_str(now.year, 12, 31)
+    if re.search(r"\blast year\b|\bgeçen yıl\b|\bgecen yil\b|\bgeçen sene\b|\bgecen sene\b", lowered):
+        y = now.year - 1
+        return _date_str(y, 1, 1), _date_str(y, 12, 31)
+
+    # Seasons with "this" / "last".
+    for name, (start_month, end_month) in SEASONS.items():
+        if re.search(rf"\bthis\s+{re.escape(name)}\b|\bbu\s+{re.escape(name)}\b", lowered):
+            anchor_year = now.year if start_month <= now.month else now.year - 1
+            return _season_window(anchor_year, start_month, end_month)
+        if re.search(rf"\blast\s+{re.escape(name)}\b|\bgeçen\s+{re.escape(name)}\b|\bgecen\s+{re.escape(name)}\b", lowered):
+            anchor_year = (now.year - 1) if start_month <= now.month else (now.year - 2)
+            return _season_window(anchor_year, start_month, end_month)
+
     return None
 
 

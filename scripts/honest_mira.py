@@ -9,6 +9,7 @@ import time
 import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ LAB_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = LAB_ROOT / "data" / "neural_mira_model.pt"
 DEFAULT_METRICS = LAB_ROOT / "data" / "neural_mira_metrics.json"
 DEFAULT_REPORT = LAB_ROOT / "docs" / "honest_evaluation_report.md"
+DEFAULT_EMBEDDINGS_CACHE = LAB_ROOT / "data" / "neural_embeddings.pt"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 MONTH_NAMES = {
     1: "January",
@@ -99,8 +102,14 @@ SCALAR_PRIOR_WEIGHTS = {
 SOURCE_FEATURE_NAMES = [
     "query_mentions_whatsapp",
     "query_mentions_diary",
+    "query_mentions_overview",
+    "query_mentions_pattern",
     "memory_is_whatsapp",
     "memory_is_diary",
+    "memory_is_rollup_week",
+    "memory_is_rollup_month",
+    "memory_is_atom",
+    "memory_is_reflection",
     "source_match",
     "participant_match",
     "participant_count_norm",
@@ -116,6 +125,7 @@ class EvalExample:
     target_month: str
     target_date: str | None = None
     note: str = ""
+    negative_ids: tuple[str, ...] = ()
 
 
 class BM25Index:
@@ -189,6 +199,144 @@ class SemanticLsaIndex:
         )
 
 
+class DenseSemanticIndex:
+    """Dense semantic head over multilingual MiniLM embeddings.
+
+    Memory embeddings come from the on-disk cache (`neural_embeddings.pt`) when
+    its `memory_ids` line up with the current corpus. Otherwise we re-encode
+    just-in-time. Query embeddings are always computed live (we cache them per
+    process via an LRU dict to avoid re-encoding identical queries inside an
+    evaluation sweep).
+    """
+
+    def __init__(
+        self,
+        memories: list[DiaryMemory],
+        *,
+        cache_path: Path | str | None = DEFAULT_EMBEDDINGS_CACHE,
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
+        device: str | None = None,
+        batch_size: int = 128,
+        max_chars: int = 2000,
+    ) -> None:
+        self.memories = memories
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self.max_chars = max_chars
+        self._device = device or _pick_embed_device()
+        self._model = None  # lazy
+        self._query_cache: dict[str, np.ndarray] = {}
+
+        memory_ids = [memory.entry_id for memory in memories]
+        cached = _load_embedding_cache(cache_path) if cache_path else None
+
+        if cached and cached["memory_ids"] == memory_ids and cached["embedding_model"] == model_name:
+            self.embeddings = cached["memory_embeddings"]
+            self.embedding_dim = int(cached["embedding_dim"])
+            self._cache_path = Path(cache_path) if cache_path else None
+            self._source = "cache"
+        else:
+            self.embeddings = self._encode_memories(memories)
+            self.embedding_dim = int(self.embeddings.shape[-1])
+            self._cache_path = None
+            self._source = "fresh"
+
+    # ----- internal -----
+    def _ensure_model(self):
+        if self._model is False:
+            return None  # we already tried and failed
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer  # lazy import
+                self._model = SentenceTransformer(self.model_name, device=self._device)
+            except Exception as exc:
+                print(f"warning: SentenceTransformer unavailable ({exc}); dense query embeddings disabled.")
+                self._model = False  # sentinel: never try again
+                return None
+        return self._model
+
+    def _encode_memories(self, memories: list[DiaryMemory]) -> np.ndarray:
+        from htema_core import compact_text  # local to avoid cycles
+        model = self._ensure_model()
+        if model is None:
+            return np.zeros((len(memories), self.embedding_dim or 384), dtype=np.float32)
+        texts = [compact_text(memory.text, self.max_chars) for memory in memories]
+        vectors = model.encode(
+            texts,
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return np.asarray(vectors, dtype=np.float32)
+
+    def _encode_query(self, query: str) -> np.ndarray:
+        model = self._ensure_model()
+        if model is None:
+            return np.zeros(self.embedding_dim or 384, dtype=np.float32)
+        vectors = model.encode(
+            [query],
+            batch_size=1,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        return np.asarray(vectors[0], dtype=np.float32)
+
+    # ----- public -----
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def scores(self, query: str) -> np.ndarray:
+        cached = self._query_cache.get(query)
+        if cached is None:
+            cached = self._encode_query(query)
+            # Bound the cache so a long sweep doesn't grow forever.
+            if len(self._query_cache) >= 2048:
+                self._query_cache.pop(next(iter(self._query_cache)))
+            self._query_cache[query] = cached
+        return (self.embeddings @ cached).astype(np.float32)
+
+
+def _pick_embed_device() -> str:
+    try:
+        import torch  # noqa: F401
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _load_embedding_cache(path: Path | str | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    cache_path = Path(path)
+    if not cache_path.exists():
+        return None
+    try:
+        try:
+            payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(cache_path, map_location="cpu")
+    except Exception as exc:
+        print(f"warning: failed to load embedding cache {cache_path}: {exc}")
+        return None
+
+    embeddings = payload.get("memory_embeddings")
+    if embeddings is None:
+        return None
+    if hasattr(embeddings, "detach"):
+        embeddings = embeddings.detach().cpu().numpy()
+    return {
+        "memory_ids": list(payload.get("memory_ids", [])),
+        "embedding_model": str(payload.get("embedding_model", "")),
+        "embedding_dim": int(payload.get("embedding_dim", embeddings.shape[-1])),
+        "memory_embeddings": np.asarray(embeddings, dtype=np.float32),
+    }
+
+
 def safe_l2_normalize(values: np.ndarray) -> np.ndarray:
     array = np.nan_to_num(np.asarray(values, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     if array.ndim == 1:
@@ -227,17 +375,53 @@ def query_mentions_diary(query: str) -> bool:
     return bool(re_search_any(lowered, ["diary", "dailybean", "entry", "mood", "icons", "day happened"]))
 
 
+def query_mentions_overview(query: str) -> bool:
+    lowered = query.lower()
+    return bool(re_search_any(lowered, [
+        "overall", "overview", "summary", "summarize", "summarise", "in summary",
+        "this week", "last week", "this month", "last month", "this year", "last year",
+        "during the week", "during the month", "across", "throughout",
+        "haftalık", "haftalik", "aylık", "aylik", "yıllık", "yillik", "genel olarak",
+    ]))
+
+
+def query_mentions_pattern(query: str) -> bool:
+    lowered = query.lower()
+    return bool(re_search_any(lowered, [
+        "pattern", "patterns", "trend", "trends", "tendency", "tendencies",
+        "always", "keep", "keeps", "repeatedly", "recurring", "recurrence",
+        "identity", "self", "myself", "why do i", "why am i",
+        "her zaman", "sürekli", "surekli", "tekrar tekrar", "kendim", "kendime",
+    ]))
+
+
 def re_search_any(text: str, terms: list[str]) -> bool:
     return any(term in text for term in terms)
 
 
 def source_feature_values(memory: DiaryMemory, query_text: str, query_tokens: set[str]) -> list[float]:
-    is_whatsapp = 1.0 if getattr(memory, "source_type", "diary") == "whatsapp" else 0.0
-    is_diary = 1.0 - is_whatsapp
+    source_type = getattr(memory, "source_type", "diary")
+    is_whatsapp = 1.0 if source_type == "whatsapp" else 0.0
+    is_diary = 1.0 if source_type == "diary" else 0.0
+    is_rollup_week = 1.0 if source_type == "rollup_week" else 0.0
+    is_rollup_month = 1.0 if source_type == "rollup_month" else 0.0
+    is_atom = 1.0 if source_type == "atom" else 0.0
+    is_reflection = 1.0 if source_type == "reflection" else 0.0
+
     wants_whatsapp = 1.0 if query_mentions_whatsapp(query_text) else 0.0
     wants_diary = 1.0 if query_mentions_diary(query_text) else 0.0
-    if wants_whatsapp or wants_diary:
-        source_match = max(wants_whatsapp * is_whatsapp, wants_diary * is_diary)
+    wants_overview = 1.0 if query_mentions_overview(query_text) else 0.0
+    wants_pattern = 1.0 if query_mentions_pattern(query_text) else 0.0
+
+    overview_match = wants_overview * max(is_rollup_week, is_rollup_month)
+    pattern_match = wants_pattern * is_reflection
+    if wants_whatsapp or wants_diary or wants_overview or wants_pattern:
+        source_match = max(
+            wants_whatsapp * is_whatsapp,
+            wants_diary * is_diary,
+            overview_match,
+            pattern_match,
+        )
     else:
         source_match = 0.5
 
@@ -249,8 +433,14 @@ def source_feature_values(memory: DiaryMemory, query_text: str, query_tokens: se
     return [
         wants_whatsapp,
         wants_diary,
+        wants_overview,
+        wants_pattern,
         is_whatsapp,
         is_diary,
+        is_rollup_week,
+        is_rollup_month,
+        is_atom,
+        is_reflection,
         source_match,
         min(1.0, participant_match * 3.0),
         min(len(getattr(memory, "participants", ())), 8) / 8,
@@ -394,17 +584,66 @@ def add_example(
 
 def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[EvalExample]:
     rng = random.Random(seed)
-    by_month: dict[str, list[DiaryMemory]] = defaultdict(list)
+
+    # Queries are generated from leaf memories (diary + WhatsApp).
+    # Hierarchical and reflection tokens are used as co-positive extensions
+    # so the model is not penalized for legitimately surfacing them when the
+    # gold answer is a leaf day inside their span.
+    leaf_kinds = {"diary", "whatsapp"}
+    leaves = [memory for memory in memories if getattr(memory, "source_type", "diary") in leaf_kinds]
+    rollups_month = {memory.entry_id: memory for memory in memories if getattr(memory, "source_type", "") == "rollup_month"}
+    rollups_week = {memory.entry_id: memory for memory in memories if getattr(memory, "source_type", "") == "rollup_week"}
+    atoms_by_parent: dict[str, list[str]] = defaultdict(list)
     for memory in memories:
+        if getattr(memory, "source_type", "") == "atom":
+            parent_id = memory.entry_id.split(":", 1)[1].rsplit(":", 1)[0] if memory.entry_id.startswith("atom:") else ""
+            if parent_id:
+                atoms_by_parent[parent_id].append(memory.entry_id)
+
+    # Pre-compute week rollup index by ISO (year, week) for fast lookups.
+    week_rollup_by_iso: dict[tuple[int, int], str] = {}
+    for entry_id, memory in rollups_week.items():
+        try:
+            tail = entry_id.split("rollup:week:", 1)[1]
+            year_str, week_str = tail.split("-W", 1)
+            week_rollup_by_iso[(int(year_str), int(week_str))] = entry_id
+        except (IndexError, ValueError):
+            continue
+
+    leaf_by_id = {m.entry_id: m for m in leaves}
+
+    def _expand_with_hierarchy(positive_ids: list[str], target_year: int | None = None, target_month: int | None = None) -> list[str]:
+        out = list(positive_ids)
+        # Month rollup matches when the query targets a month.
+        if target_year is not None and target_month is not None:
+            month_id = f"rollup:month:{target_year}-{target_month:02d}"
+            if month_id in rollups_month:
+                out.append(month_id)
+        # Per-leaf: include atoms of that leaf, and the week rollup whose window contains it.
+        for entry_id in positive_ids:
+            for atom_id in atoms_by_parent.get(entry_id, []):
+                out.append(atom_id)
+            memory = leaf_by_id.get(entry_id)
+            if memory is None:
+                continue
+            iso = date.fromisoformat(memory.date).isocalendar()
+            week_id = week_rollup_by_iso.get((iso.year, iso.week))
+            if week_id is not None:
+                out.append(week_id)
+        return list(dict.fromkeys(out))
+
+    by_month: dict[str, list[DiaryMemory]] = defaultdict(list)
+    for memory in leaves:
         by_month[month_key(memory)].append(memory)
 
-    rare_by_id = rare_terms_for_memories(memories)
+    rare_by_id = rare_terms_for_memories(leaves)
     examples: list[EvalExample] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
 
     for key, month_memories in sorted(by_month.items()):
         label = month_label(month_memories[0])
         mooded = [memory for memory in month_memories if memory.mood is not None]
+        target_year, target_month_int = month_memories[0].year, month_memories[0].month
         if mooded:
             max_mood = max(memory.mood or 0 for memory in mooded)
             min_mood = min(memory.mood or 5 for memory in mooded)
@@ -414,7 +653,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                     examples,
                     seen,
                     query=f"happiest diary days in {label}",
-                    positive_ids=positives,
+                    positive_ids=_expand_with_hierarchy(positives, target_year, target_month_int),
                     intent="emotion_temporal_recall",
                     style="emotion_month",
                     target_month=key,
@@ -426,7 +665,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                     examples,
                     seen,
                     query=f"lowest mood diary days in {label}",
-                    positive_ids=positives,
+                    positive_ids=_expand_with_hierarchy(positives, target_year, target_month_int),
                     intent="emotion_temporal_recall",
                     style="emotion_month",
                     target_month=key,
@@ -440,13 +679,13 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                     examples,
                     seen,
                     query=f"{feature} memories in {label}",
-                    positive_ids=positives,
+                    positive_ids=_expand_with_hierarchy(positives, target_year, target_month_int),
                     intent="feature_temporal_recall",
                     style="feature_month",
                     target_month=key,
                 )
 
-    for memory in memories:
+    for memory in leaves:
         key = month_key(memory)
         label = month_label(memory)
         terms = rare_by_id.get(memory.entry_id, [])
@@ -454,6 +693,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
         icon_terms = [clean_query_term(icon.replace("-", " ")) for icon in memory.icons[:4]]
         icon_terms = [item for item in icon_terms if item]
 
+        single_positive = _expand_with_hierarchy([memory.entry_id])
         if memory.mood is not None:
             signal = feature or (icon_terms[0] if icon_terms else None)
             if signal:
@@ -461,7 +701,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                     examples,
                     seen,
                     query=f"which {mood_word(memory.mood)} {signal} day happened in {label}",
-                    positive_ids=[memory.entry_id],
+                    positive_ids=single_positive,
                     intent="emotion_feature_recall",
                     style="emotion_feature",
                     target_month=key,
@@ -472,7 +712,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                     examples,
                     seen,
                     query=f"find the {label} entry with mood {memory.mood}/5 and {icon_terms[0]} energy",
-                    positive_ids=[memory.entry_id],
+                    positive_ids=single_positive,
                     intent="diary_signal_recall",
                     style="mood_signal",
                     target_month=key,
@@ -485,7 +725,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                 examples,
                 seen,
                 query=f"when did I write about {phrase}",
-                positive_ids=[memory.entry_id],
+                positive_ids=single_positive,
                 intent="semantic_recall",
                 style="rare_terms",
                 target_month=key,
@@ -493,7 +733,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
             )
             neighbor_ids = [
                 item.entry_id
-                for item in memories
+                for item in leaves
                 if abs(item.ordinal - memory.ordinal) <= 1
             ]
             add_example(
@@ -515,7 +755,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                 examples,
                 seen,
                 query=f"the {phase_word(day)} {label} {mood_word(memory.mood)} {detail} memory",
-                positive_ids=[memory.entry_id],
+                positive_ids=single_positive,
                 intent="temporal_emotional_detail",
                 style="relative_temporal",
                 target_month=key,
@@ -525,7 +765,7 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
     # -----------------------------------------------------------------------
     # WhatsApp-specific queries
     # -----------------------------------------------------------------------
-    whatsapp_memories = [m for m in memories if getattr(m, 'source_type', 'diary') == 'whatsapp']
+    whatsapp_memories = [m for m in leaves if getattr(m, 'source_type', 'diary') == 'whatsapp']
     by_participant: dict[str, list[DiaryMemory]] = defaultdict(list)
     for memory in whatsapp_memories:
         for participant in getattr(memory, 'participants', ()):
@@ -580,10 +820,10 @@ def generate_benchmark(memories: list[DiaryMemory], seed: int = 13) -> list[Eval
                 )
 
             if len(terms) >= 1:
-                # Continuity: messages around this conversation
+                # Continuity: messages around this conversation (over leaves only).
                 neighbor_ids = [
                     item.entry_id
-                    for item in memories
+                    for item in leaves
                     if abs(item.ordinal - memory.ordinal) <= 1
                 ]
                 if len(neighbor_ids) > 1:
@@ -634,6 +874,11 @@ def load_augmented_examples(paths: list[Path], memories: list[DiaryMemory]) -> l
                 seen.add(key)
 
                 first_memory = memory_by_id[positives[0]]
+                negatives = tuple(sorted({
+                    str(item)
+                    for item in (row.get("negative_ids") or [])
+                    if str(item) in memory_by_id
+                }))
                 loaded.append(
                     EvalExample(
                         query=query,
@@ -643,6 +888,7 @@ def load_augmented_examples(paths: list[Path], memories: list[DiaryMemory]) -> l
                         target_month=str(row.get("target_month") or month_key(first_memory)),
                         target_date=row.get("target_date") or (first_memory.date if len(positives) == 1 else None),
                         note=str(row.get("note") or row.get("why") or "LLM style augmentation"),
+                        negative_ids=negatives,
                     )
                 )
     return loaded
@@ -836,34 +1082,51 @@ def zscore(values: np.ndarray) -> np.ndarray:
     return (values - float(values.mean())) / std
 
 
+PAIR_FEATURE_NAMES = [
+    *FEATURE_NAMES,
+    *SOURCE_FEATURE_NAMES,
+    "bm25",
+    "bm25_z",
+    "bm25_rank",
+    "semantic_embed",
+    "semantic_z",
+    "semantic_rank",
+    "dense_semantic",
+    "dense_z",
+    "dense_rank",
+    "scalar_htema",
+    "semantic_x_temporal",
+    "bm25_x_temporal",
+    "dense_x_temporal",
+    "dense_x_entity",
+    "emotion_x_temporal",
+    "entity_x_temporal",
+    "semantic_x_entity",
+]
+
+
+def _rank_score(order: np.ndarray, length: int) -> np.ndarray:
+    out = np.zeros(length, dtype=np.float32)
+    for rank, index in enumerate(order, start=1):
+        out[index] = 1.0 / math.log2(rank + 1)
+    return out
+
+
 def build_pair_features(
     examples: list[EvalExample],
     memories: list[DiaryMemory],
     bm25: BM25Index,
     semantic: SemanticLsaIndex,
+    dense: "DenseSemanticIndex | None" = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], list[str]]:
     all_rows = []
-    component_scores = {
+    component_scores: dict[str, list[np.ndarray]] = {
         "bm25": [],
         "semantic_embed": [],
+        "dense_semantic": [],
         "scalar_htema": [],
     }
-    feature_names = [
-        *FEATURE_NAMES,
-        *SOURCE_FEATURE_NAMES,
-        "bm25",
-        "bm25_z",
-        "bm25_rank",
-        "semantic_embed",
-        "semantic_z",
-        "semantic_rank",
-        "scalar_htema",
-        "semantic_x_temporal",
-        "bm25_x_temporal",
-        "emotion_x_temporal",
-        "entity_x_temporal",
-        "semantic_x_entity",
-    ]
+    feature_names = list(PAIR_FEATURE_NAMES)
 
     for example in examples:
         query = build_query_spec(example.query)
@@ -871,18 +1134,22 @@ def build_pair_features(
         anchors = anchor_ordinals(query, memories)
         bm25_scores = bm25.scores(example.query)
         semantic_scores = semantic.scores(example.query)
+        dense_scores = (
+            dense.scores(example.query)
+            if dense is not None
+            else np.zeros(len(memories), dtype=np.float32)
+        )
+
         bm25_norm = minmax(bm25_scores)
         semantic_norm = minmax(semantic_scores)
+        dense_norm = minmax(dense_scores)
         bm25_z = zscore(bm25_scores)
         semantic_z = zscore(semantic_scores)
-        bm25_order = np.argsort(-bm25_scores)
-        semantic_order = np.argsort(-semantic_scores)
-        bm25_rank = np.zeros(len(memories), dtype=np.float32)
-        semantic_rank = np.zeros(len(memories), dtype=np.float32)
-        for rank, index in enumerate(bm25_order, start=1):
-            bm25_rank[index] = 1.0 / math.log2(rank + 1)
-        for rank, index in enumerate(semantic_order, start=1):
-            semantic_rank[index] = 1.0 / math.log2(rank + 1)
+        dense_z = zscore(dense_scores)
+
+        bm25_rank = _rank_score(np.argsort(-bm25_scores), len(memories))
+        semantic_rank = _rank_score(np.argsort(-semantic_scores), len(memories))
+        dense_rank = _rank_score(np.argsort(-dense_scores), len(memories))
 
         rows = []
         scalar_scores = []
@@ -892,6 +1159,7 @@ def build_pair_features(
             scalar_scores.append(scalar_score)
             semantic_value = float(semantic_norm[index])
             bm25_value = float(bm25_norm[index])
+            dense_value = float(dense_norm[index])
             temporal = float(base["temporal"])
             emotion = float(base["emotion"])
             entity = float(base["entity"])
@@ -904,9 +1172,14 @@ def build_pair_features(
                 semantic_value,
                 float(semantic_z[index]),
                 float(semantic_rank[index]),
+                dense_value,
+                float(dense_z[index]),
+                float(dense_rank[index]),
                 float(scalar_score),
                 semantic_value * temporal,
                 bm25_value * temporal,
+                dense_value * temporal,
+                dense_value * entity,
                 emotion * temporal,
                 entity * temporal,
                 semantic_value * entity,
@@ -916,6 +1189,7 @@ def build_pair_features(
         all_rows.append(rows)
         component_scores["bm25"].append(bm25_scores)
         component_scores["semantic_embed"].append(semantic_scores)
+        component_scores["dense_semantic"].append(dense_scores)
         component_scores["scalar_htema"].append(np.asarray(scalar_scores, dtype=np.float32))
 
     features = np.asarray(all_rows, dtype=np.float32)
@@ -941,12 +1215,16 @@ def select_candidate_indices(
     scalar_scores: np.ndarray,
     top_k: int,
     include_positives: bool,
+    dense_scores: np.ndarray | None = None,
 ) -> np.ndarray:
     top_k = min(max(8, top_k), len(memories))
-    per_channel = max(8, top_k // 3)
+    channels = 4 if dense_scores is not None else 3
+    per_channel = max(8, top_k // channels)
     selected: list[int] = []
     seen: set[int] = set()
     blended = minmax(bm25_scores) + minmax(semantic_scores) + minmax(scalar_scores)
+    if dense_scores is not None:
+        blended = blended + 1.4 * minmax(dense_scores)
 
     def add(indices: list[int]) -> None:
         for index in indices:
@@ -959,6 +1237,8 @@ def select_candidate_indices(
         add([memory_index[entry_id] for entry_id in example.positive_ids if entry_id in memory_index])
     add(top_indices(bm25_scores, per_channel))
     add(top_indices(semantic_scores, per_channel))
+    if dense_scores is not None:
+        add(top_indices(dense_scores, per_channel))
     add(top_indices(scalar_scores, per_channel))
 
     add(top_indices(blended, top_k))
@@ -973,30 +1253,17 @@ def build_candidate_pair_features(
     semantic: SemanticLsaIndex,
     candidate_top_k: int,
     include_positives: bool,
+    dense: "DenseSemanticIndex | None" = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], list[str], np.ndarray]:
     all_rows = []
     candidate_rows = []
-    full_components = {
+    full_components: dict[str, list[np.ndarray]] = {
         "bm25": [],
         "semantic_embed": [],
+        "dense_semantic": [],
         "scalar_htema": [],
     }
-    feature_names = [
-        *FEATURE_NAMES,
-        *SOURCE_FEATURE_NAMES,
-        "bm25",
-        "bm25_z",
-        "bm25_rank",
-        "semantic_embed",
-        "semantic_z",
-        "semantic_rank",
-        "scalar_htema",
-        "semantic_x_temporal",
-        "bm25_x_temporal",
-        "emotion_x_temporal",
-        "entity_x_temporal",
-        "semantic_x_entity",
-    ]
+    feature_names = list(PAIR_FEATURE_NAMES)
 
     for example in examples:
         query = build_query_spec(example.query)
@@ -1004,18 +1271,22 @@ def build_candidate_pair_features(
         anchors = anchor_ordinals(query, memories)
         bm25_scores = bm25.scores(example.query)
         semantic_scores = semantic.scores(example.query)
+        dense_scores = (
+            dense.scores(example.query)
+            if dense is not None
+            else np.zeros(len(memories), dtype=np.float32)
+        )
+
         bm25_norm = minmax(bm25_scores)
         semantic_norm = minmax(semantic_scores)
+        dense_norm = minmax(dense_scores)
         bm25_z = zscore(bm25_scores)
         semantic_z = zscore(semantic_scores)
-        bm25_order = np.argsort(-bm25_scores)
-        semantic_order = np.argsort(-semantic_scores)
-        bm25_rank = np.zeros(len(memories), dtype=np.float32)
-        semantic_rank = np.zeros(len(memories), dtype=np.float32)
-        for rank, index in enumerate(bm25_order, start=1):
-            bm25_rank[index] = 1.0 / math.log2(rank + 1)
-        for rank, index in enumerate(semantic_order, start=1):
-            semantic_rank[index] = 1.0 / math.log2(rank + 1)
+        dense_z = zscore(dense_scores)
+
+        bm25_rank = _rank_score(np.argsort(-bm25_scores), len(memories))
+        semantic_rank = _rank_score(np.argsort(-semantic_scores), len(memories))
+        dense_rank = _rank_score(np.argsort(-dense_scores), len(memories))
 
         base_features = [feature_vector(memory, query, anchors) for memory in memories]
         scalar_scores = np.asarray([dot(SCALAR_PRIOR_WEIGHTS, base) for base in base_features], dtype=np.float32)
@@ -1027,6 +1298,7 @@ def build_candidate_pair_features(
             scalar_scores,
             candidate_top_k,
             include_positives,
+            dense_scores=dense_scores,
         )
 
         rows = []
@@ -1035,6 +1307,7 @@ def build_candidate_pair_features(
             base = base_features[int(index)]
             semantic_value = float(semantic_norm[index])
             bm25_value = float(bm25_norm[index])
+            dense_value = float(dense_norm[index])
             temporal = float(base["temporal"])
             emotion = float(base["emotion"])
             entity = float(base["entity"])
@@ -1048,9 +1321,14 @@ def build_candidate_pair_features(
                     semantic_value,
                     float(semantic_z[index]),
                     float(semantic_rank[index]),
+                    dense_value,
+                    float(dense_z[index]),
+                    float(dense_rank[index]),
                     float(scalar_scores[index]),
                     semantic_value * temporal,
                     bm25_value * temporal,
+                    dense_value * temporal,
+                    dense_value * entity,
                     emotion * temporal,
                     entity * temporal,
                     semantic_value * entity,
@@ -1061,6 +1339,7 @@ def build_candidate_pair_features(
         candidate_rows.append(candidates)
         full_components["bm25"].append(bm25_scores)
         full_components["semantic_embed"].append(semantic_scores)
+        full_components["dense_semantic"].append(dense_scores)
         full_components["scalar_htema"].append(scalar_scores)
 
     features = np.asarray(all_rows, dtype=np.float32)
@@ -1258,6 +1537,57 @@ def candidate_component_scores(component_scores: np.ndarray, candidate_indices: 
     return np.take_along_axis(component_scores, candidate_indices, axis=1).astype(np.float32)
 
 
+CALIBRATION_CHANNELS = ("neural", "bm25", "semantic", "dense", "scalar")
+
+
+def _calibration_grid() -> list[dict[str, float]]:
+    """Hand-tuned grid over the five calibration channels.
+
+    We iterate the neural and dense weights densely and the rest coarsely,
+    since dense+neural dominate in practice. Total combos ~ 5×6×4×3×4 = 1440.
+    """
+    combos: list[dict[str, float]] = []
+    for neural_w in (0.0, 0.4, 0.85, 1.25, 1.6, 2.0):
+        for dense_w in (0.0, 0.35, 0.75, 1.1, 1.5, 1.9):
+            for bm25_w in (0.0, 0.15, 0.35, 0.7):
+                for semantic_w in (0.0, 0.15, 0.35):
+                    for scalar_w in (0.0, 0.2, 0.5, 0.9):
+                        if neural_w + dense_w + bm25_w + semantic_w + scalar_w <= 0:
+                            continue
+                        combos.append({
+                            "neural": neural_w,
+                            "bm25": bm25_w,
+                            "semantic": semantic_w,
+                            "dense": dense_w,
+                            "scalar": scalar_w,
+                        })
+    return combos
+
+
+def _normalized_components(
+    neural: np.ndarray,
+    components: dict[str, np.ndarray],
+    candidate_indices: np.ndarray | None,
+) -> dict[str, np.ndarray]:
+    def pick(name: str) -> np.ndarray:
+        full = components[name]
+        if candidate_indices is None:
+            return normalize_component(full)
+        return normalize_component(candidate_component_scores(full, candidate_indices))
+
+    return {
+        "neural": normalize_component(neural),
+        "bm25": pick("bm25"),
+        "semantic": pick("semantic_embed"),
+        "dense": pick("dense_semantic"),
+        "scalar": pick("scalar_htema"),
+    }
+
+
+def _weighted_sum(weights: dict[str, float], comps: dict[str, np.ndarray]) -> np.ndarray:
+    return sum(weights[name] * comps[name] for name in CALIBRATION_CHANNELS)
+
+
 def calibrate_scores(
     calibration_examples: list[EvalExample],
     train_examples: list[EvalExample],
@@ -1270,50 +1600,22 @@ def calibrate_scores(
     train_components: dict[str, np.ndarray],
     test_components: dict[str, np.ndarray],
 ) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
-    components_calibration = {
-        "neural": normalize_component(calibration_neural),
-        "bm25": normalize_component(calibration_components["bm25"]),
-        "semantic": normalize_component(calibration_components["semantic_embed"]),
-        "scalar": normalize_component(calibration_components["scalar_htema"]),
-    }
-    components_train = {
-        "neural": normalize_component(train_neural),
-        "bm25": normalize_component(train_components["bm25"]),
-        "semantic": normalize_component(train_components["semantic_embed"]),
-        "scalar": normalize_component(train_components["scalar_htema"]),
-    }
-    components_test = {
-        "neural": normalize_component(test_neural),
-        "bm25": normalize_component(test_components["bm25"]),
-        "semantic": normalize_component(test_components["semantic_embed"]),
-        "scalar": normalize_component(test_components["scalar_htema"]),
-    }
+    components_calibration = _normalized_components(calibration_neural, calibration_components, None)
+    components_train = _normalized_components(train_neural, train_components, None)
+    components_test = _normalized_components(test_neural, test_components, None)
 
-    best_weights = {"neural": 1.0, "bm25": 0.0, "semantic": 0.0, "scalar": 0.0}
+    best_weights = {name: 0.0 for name in CALIBRATION_CHANNELS}
+    best_weights["neural"] = 1.0
     best_mrr = -1.0
-    grid = [0.0, 0.15, 0.3, 0.5, 0.75, 1.0, 1.35]
-    for neural_w in [0.6, 0.85, 1.0, 1.25, 1.6, 2.0]:
-        for bm25_w in grid:
-            for semantic_w in [0.0, 0.15, 0.3, 0.5]:
-                for scalar_w in grid:
-                    scores = (
-                        neural_w * components_calibration["neural"]
-                        + bm25_w * components_calibration["bm25"]
-                        + semantic_w * components_calibration["semantic"]
-                        + scalar_w * components_calibration["scalar"]
-                    )
-                    metrics = rank_metrics(calibration_examples, memories, scores)
-                    if metrics["mrr"] > best_mrr:
-                        best_mrr = metrics["mrr"]
-                        best_weights = {
-                            "neural": neural_w,
-                            "bm25": bm25_w,
-                            "semantic": semantic_w,
-                            "scalar": scalar_w,
-                        }
+    for combo in _calibration_grid():
+        scores = _weighted_sum(combo, components_calibration)
+        metrics = rank_metrics(calibration_examples, memories, scores)
+        if metrics["mrr"] > best_mrr:
+            best_mrr = metrics["mrr"]
+            best_weights = combo
 
-    train_scores = sum(best_weights[name] * components_train[name] for name in best_weights)
-    test_scores = sum(best_weights[name] * components_test[name] for name in best_weights)
+    train_scores = _weighted_sum(best_weights, components_train)
+    test_scores = _weighted_sum(best_weights, components_test)
     best_weights["dev_calibration_mrr"] = best_mrr
     return best_weights, train_scores, test_scores
 
@@ -1333,57 +1635,22 @@ def calibrate_candidate_scores(
     train_candidate_indices: np.ndarray,
     test_candidate_indices: np.ndarray,
 ) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
-    components_calibration = {
-        "neural": normalize_component(calibration_neural),
-        "bm25": normalize_component(candidate_component_scores(calibration_components["bm25"], calibration_candidate_indices)),
-        "semantic": normalize_component(candidate_component_scores(calibration_components["semantic_embed"], calibration_candidate_indices)),
-        "scalar": normalize_component(candidate_component_scores(calibration_components["scalar_htema"], calibration_candidate_indices)),
-    }
-    components_train = {
-        "neural": normalize_component(train_neural),
-        "bm25": normalize_component(candidate_component_scores(train_components["bm25"], train_candidate_indices)),
-        "semantic": normalize_component(candidate_component_scores(train_components["semantic_embed"], train_candidate_indices)),
-        "scalar": normalize_component(candidate_component_scores(train_components["scalar_htema"], train_candidate_indices)),
-    }
-    components_test = {
-        "neural": normalize_component(test_neural),
-        "bm25": normalize_component(candidate_component_scores(test_components["bm25"], test_candidate_indices)),
-        "semantic": normalize_component(candidate_component_scores(test_components["semantic_embed"], test_candidate_indices)),
-        "scalar": normalize_component(candidate_component_scores(test_components["scalar_htema"], test_candidate_indices)),
-    }
+    components_calibration = _normalized_components(calibration_neural, calibration_components, calibration_candidate_indices)
+    components_train = _normalized_components(train_neural, train_components, train_candidate_indices)
+    components_test = _normalized_components(test_neural, test_components, test_candidate_indices)
 
-    best_weights = {"neural": 1.0, "bm25": 0.0, "semantic": 0.0, "scalar": 0.0}
+    best_weights = {name: 0.0 for name in CALIBRATION_CHANNELS}
+    best_weights["neural"] = 1.0
     best_mrr = -1.0
-    grid = [0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.35]
-    for neural_w in [0.0, 0.4, 0.6, 0.85, 1.0, 1.25, 1.6, 2.0]:
-        for bm25_w in grid:
-            for semantic_w in [0.0, 0.1, 0.2, 0.35]:
-                for scalar_w in grid:
-                    if neural_w + bm25_w + semantic_w + scalar_w <= 0:
-                        continue
-                    scores = (
-                        neural_w * components_calibration["neural"]
-                        + bm25_w * components_calibration["bm25"]
-                        + semantic_w * components_calibration["semantic"]
-                        + scalar_w * components_calibration["scalar"]
-                    )
-                    metrics = rank_metrics_candidates(
-                        calibration_examples,
-                        memories,
-                        scores,
-                        calibration_candidate_indices,
-                    )
-                    if metrics["mrr"] > best_mrr:
-                        best_mrr = metrics["mrr"]
-                        best_weights = {
-                            "neural": neural_w,
-                            "bm25": bm25_w,
-                            "semantic": semantic_w,
-                            "scalar": scalar_w,
-                        }
+    for combo in _calibration_grid():
+        scores = _weighted_sum(combo, components_calibration)
+        metrics = rank_metrics_candidates(calibration_examples, memories, scores, calibration_candidate_indices)
+        if metrics["mrr"] > best_mrr:
+            best_mrr = metrics["mrr"]
+            best_weights = combo
 
-    train_scores = sum(best_weights[name] * components_train[name] for name in best_weights)
-    test_scores = sum(best_weights[name] * components_test[name] for name in best_weights)
+    train_scores = _weighted_sum(best_weights, components_train)
+    test_scores = _weighted_sum(best_weights, components_test)
     best_weights["dev_calibration_mrr"] = best_mrr
     return best_weights, train_scores, test_scores
 
@@ -1401,6 +1668,7 @@ def run_split(
 
     bm25 = BM25Index([memory.tokens for memory in memories])
     semantic = SemanticLsaIndex([memory.text for memory in memories])
+    dense = _maybe_build_dense_index(memories, args)
     train_candidate_indices = None
     test_candidate_indices = None
     if args.candidate_top_k > 0:
@@ -1411,6 +1679,7 @@ def run_split(
             semantic,
             args.candidate_top_k,
             include_positives=True,
+            dense=dense,
         )
         test_features, test_components, _, test_candidate_indices = build_candidate_pair_features(
             test_examples,
@@ -1419,10 +1688,15 @@ def run_split(
             semantic,
             args.candidate_top_k,
             include_positives=False,
+            dense=dense,
         )
     else:
-        train_features, train_components, feature_names = build_pair_features(train_examples, memories, bm25, semantic)
-        test_features, test_components, _ = build_pair_features(test_examples, memories, bm25, semantic)
+        train_features, train_components, feature_names = build_pair_features(
+            train_examples, memories, bm25, semantic, dense=dense,
+        )
+        test_features, test_components, _ = build_pair_features(
+            test_examples, memories, bm25, semantic, dense=dense,
+        )
 
     train_baselines = evaluate_score_map(train_examples, memories, train_components)
     test_baselines = evaluate_score_map(test_examples, memories, test_components)
@@ -1488,6 +1762,10 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         f"Memory tokens: {payload['memory_count']}",
         f"Diary tokens: {payload.get('diary_count', 'n/a')}",
         f"WhatsApp tokens: {payload.get('whatsapp_count', 'n/a')}",
+        f"Rollup tokens: {payload.get('rollup_count', 0)}",
+        f"Atom tokens: {payload.get('atom_count', 0)}",
+        f"Reflection tokens: {payload.get('reflection_count', 0)}",
+        f"Dense semantic head: {payload.get('dense_head', 'unknown')}",
         f"Deterministic benchmark queries: {payload['example_count']}",
         f"Total generated benchmark queries before cap: {payload.get('total_example_count', payload['example_count'])}",
         f"Extra augmented queries loaded: {payload.get('extra_example_count', 0)}",
@@ -1567,7 +1845,66 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Additional JSONL query examples, such as data/style_augmented_queries.jsonl.",
     )
+    parser.add_argument(
+        "--embedding-cache",
+        type=Path,
+        default=DEFAULT_EMBEDDINGS_CACHE,
+        help="Path to the MiniLM memory embedding cache. Pass an empty value to disable the dense head.",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help="SentenceTransformer model name used when the cache misses or is unavailable.",
+    )
+    parser.add_argument(
+        "--no-dense",
+        action="store_true",
+        help="Disable the dense MiniLM semantic head (useful for ablation).",
+    )
+    parser.add_argument(
+        "--include-rollups",
+        action="store_true",
+        help="Append week/month hierarchical rollup tokens to the memory pool.",
+    )
+    parser.add_argument(
+        "--include-atoms",
+        action="store_true",
+        help="Append sub-day memory atoms (paragraph-level slices) to the memory pool.",
+    )
+    parser.add_argument(
+        "--include-reflections",
+        action="store_true",
+        help="Append Level-5 reflection tokens (from scripts/reflect.py) to the memory pool.",
+    )
+    parser.add_argument(
+        "--reflections-path",
+        type=Path,
+        default=None,
+        help="Override location of reflections JSONL.",
+    )
     return parser.parse_args()
+
+
+def _maybe_build_dense_index(
+    memories: list[DiaryMemory],
+    args: argparse.Namespace,
+) -> "DenseSemanticIndex | None":
+    if getattr(args, "no_dense", False):
+        print("dense_semantic_head=disabled")
+        return None
+    cache_path = getattr(args, "embedding_cache", DEFAULT_EMBEDDINGS_CACHE)
+    model_name = getattr(args, "embedding_model", DEFAULT_EMBEDDING_MODEL)
+    try:
+        dense = DenseSemanticIndex(
+            memories,
+            cache_path=cache_path if cache_path and str(cache_path) else None,
+            model_name=model_name,
+        )
+    except Exception as exc:
+        print(f"warning: failed to build dense semantic index ({exc}); falling back to LSA only.")
+        return None
+    print(f"dense_semantic_head=on source={dense.source} dim={dense.embedding_dim}")
+    return dense
 
 
 def choose_device(name: str) -> torch.device:
@@ -1586,12 +1923,37 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    memories = parse_all_memories()
+    memories = parse_all_memories(
+        include_rollups=args.include_rollups,
+        include_atoms=args.include_atoms,
+    )
+    if args.include_reflections:
+        from htema_core import load_reflections
+        reflections = load_reflections(args.reflections_path)
+        if reflections:
+            memories = sorted(memories + reflections, key=lambda m: m.ordinal)
+            print(f"Loaded {len(reflections)} Level-5 reflection tokens")
+        else:
+            print("No reflections found (run scripts/reflect.py first).")
     if not memories:
         raise SystemExit("No memories found (diary + whatsapp).")
-    diary_count = sum(1 for m in memories if getattr(m, "source_type", "diary") == "diary")
-    whatsapp_count = len(memories) - diary_count
-    print(f"Loaded {len(memories)} memories ({diary_count} diary, {whatsapp_count} whatsapp)")
+
+    by_source: dict[str, int] = {}
+    for m in memories:
+        key = getattr(m, "source_type", "diary")
+        by_source[key] = by_source.get(key, 0) + 1
+    diary_count = by_source.get("diary", 0)
+    whatsapp_count = by_source.get("whatsapp", 0)
+    rollup_count = by_source.get("rollup_week", 0) + by_source.get("rollup_month", 0)
+    atom_count = by_source.get("atom", 0)
+    reflection_count = by_source.get("reflection", 0)
+    summary = (
+        f"diary={diary_count} whatsapp={whatsapp_count}"
+        + (f" rollups={rollup_count}" if rollup_count else "")
+        + (f" atoms={atom_count}" if atom_count else "")
+        + (f" reflections={reflection_count}" if reflection_count else "")
+    )
+    print(f"Loaded {len(memories)} memories ({summary})")
     all_examples = generate_benchmark(memories, args.seed)
     extra_examples = load_augmented_examples(args.extra_examples, memories) if args.extra_examples else []
     if extra_examples:
@@ -1627,6 +1989,10 @@ def main() -> int:
         "memory_count": len(memories),
         "diary_count": diary_count,
         "whatsapp_count": whatsapp_count,
+        "rollup_count": rollup_count,
+        "atom_count": atom_count,
+        "reflection_count": reflection_count,
+        "dense_head": "off" if args.no_dense else "on",
         "example_count": len(examples),
         "total_example_count": len(all_examples),
         "extra_example_count": len(extra_examples),

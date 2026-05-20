@@ -11,6 +11,7 @@ import torch
 from honest_mira import (
     BM25Index,
     DEFAULT_MODEL,
+    DenseSemanticIndex,
     EvalExample,
     NeuralMIRARanker,
     SemanticLsaIndex,
@@ -18,7 +19,7 @@ from honest_mira import (
     build_pair_features,
     normalize_component,
 )
-from htema_core import FEATURE_NAMES, build_query_spec, compact_text, parse_all_memories
+from htema_core import FEATURE_NAMES, build_query_spec, compact_text, load_reflections, parse_all_memories
 
 
 def torch_load(path: Path, device: str | torch.device = "cpu"):
@@ -29,11 +30,23 @@ def torch_load(path: Path, device: str | torch.device = "cpu"):
 
 
 @torch.no_grad()
-def score_query(query: str, model_path: Path, device: torch.device) -> tuple[list, np.ndarray, dict[str, np.ndarray], dict, np.ndarray]:
+def score_query(
+    query: str,
+    model_path: Path,
+    device: torch.device,
+    *,
+    include_rollups: bool = True,
+    include_atoms: bool = True,
+    include_reflections: bool = True,
+) -> tuple[list, np.ndarray, dict[str, np.ndarray], dict, np.ndarray]:
     if not model_path.exists():
         raise SystemExit(f"No neural MIRA model found at {model_path}. Run scripts/honest_mira.py first.")
 
-    memories = parse_all_memories()
+    memories = parse_all_memories(include_rollups=include_rollups, include_atoms=include_atoms)
+    if include_reflections:
+        reflections = load_reflections()
+        if reflections:
+            memories = sorted(memories + reflections, key=lambda m: m.ordinal)
     checkpoint = torch_load(model_path, device)
     model = NeuralMIRARanker(len(checkpoint["feature_names"])).to(device)
     model.load_state_dict(checkpoint["state_dict"])
@@ -41,6 +54,12 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
 
     bm25 = BM25Index([memory.tokens for memory in memories])
     semantic = SemanticLsaIndex([memory.text for memory in memories])
+    try:
+        dense: DenseSemanticIndex | None = DenseSemanticIndex(memories)
+    except Exception as exc:
+        print(f"warning: dense head unavailable ({exc}); falling back to LSA only.")
+        dense = None
+
     example = EvalExample(
         query=query,
         positive_ids=(memories[0].entry_id,),
@@ -48,7 +67,7 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
         style="ad_hoc",
         target_month="",
     )
-    features, components, feature_names = build_pair_features([example], memories, bm25, semantic)
+    features, components, feature_names = build_pair_features([example], memories, bm25, semantic, dense=dense)
     features = align_feature_matrix(features, feature_names, checkpoint["feature_names"])
     mean = checkpoint["mean"]
     std = checkpoint["std"]
@@ -58,6 +77,7 @@ def score_query(query: str, model_path: Path, device: torch.device) -> tuple[lis
         "neural": normalize_component(neural),
         "bm25": normalize_component(components["bm25"]),
         "semantic": normalize_component(components["semantic_embed"]),
+        "dense": normalize_component(components.get("dense_semantic", components["semantic_embed"])),
         "scalar": normalize_component(components["scalar_htema"]),
     }
     calibration = checkpoint["calibration"]
@@ -73,6 +93,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--temporal-floor", type=float, default=0.35)
     parser.add_argument("--include-out-of-window", action="store_true")
+    parser.add_argument("--no-rollups", action="store_true", help="Exclude week/month rollup tokens from the corpus.")
+    parser.add_argument("--no-atoms", action="store_true", help="Exclude sub-day memory atoms.")
+    parser.add_argument("--no-reflections", action="store_true", help="Exclude Level-5 reflection tokens.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--show-text", action="store_true")
     return parser.parse_args()
@@ -90,7 +113,14 @@ def main() -> int:
     args = parse_args()
     query = " ".join(args.query)
     device = choose_device(args.device)
-    memories, scores, components, checkpoint, features = score_query(query, args.model, device)
+    memories, scores, components, checkpoint, features = score_query(
+        query,
+        args.model,
+        device,
+        include_rollups=not args.no_rollups,
+        include_atoms=not args.no_atoms,
+        include_reflections=not args.no_reflections,
+    )
     candidate_indices = np.arange(len(memories))
     query_spec = build_query_spec(query)
     if query_spec.time_window and not args.include_out_of_window:
@@ -112,6 +142,7 @@ def main() -> int:
                 "neural": float(components["neural"][0, index]),
                 "bm25": float(components["bm25"][0, index]),
                 "semantic": float(components["semantic"][0, index]),
+                "dense": float(components["dense"][0, index]),
                 "scalar": float(components["scalar"][0, index]),
                 "icons": memory.icons,
                 "source_type": getattr(memory, "source_type", "diary"),
@@ -145,7 +176,7 @@ def main() -> int:
     print("calibration:", ", ".join(f"{key}={value:.2f}" for key, value in checkpoint["calibration"].items()))
     for result in results:
         print(
-            "\n#{rank} score={score:.3f} date={date} mood={mood} neural={neural:.2f} bm25={bm25:.2f} semantic={semantic:.2f} scalar={scalar:.2f}".format(
+            "\n#{rank} score={score:.3f} date={date} mood={mood} src={source_type} neural={neural:.2f} bm25={bm25:.2f} semantic={semantic:.2f} dense={dense:.2f} scalar={scalar:.2f}".format(
                 **result
             )
         )

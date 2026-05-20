@@ -9,71 +9,81 @@ Rules:
 - BM25 and dense semantic embedding baselines run over the same memory tokens.
 - Neural MIRA is evaluated as a candidate reranker when `candidate_top_k` is greater than zero.
 
-Generated at: 2026-05-13T03:24:01Z
-Memory tokens: 7448
+Generated at: 2026-05-18T15:42:08Z
+Memory tokens: 7657
 Diary tokens: 350
 WhatsApp tokens: 7098
-Deterministic benchmark queries: 3000
-Total generated benchmark queries before cap: 34673
-Extra augmented queries loaded: 5800
+Rollup tokens: 87
+Atom tokens: 67
+Reflection tokens: 55
+Dense semantic head: on
+Deterministic benchmark queries: 1800
+Total generated benchmark queries before cap: 28873
+Extra augmented queries loaded: 0
 Candidate top-k for neural reranking: 768
 
 ## random
 
-Train examples: 2340; test examples: 660
+Train examples: 1404; test examples: 396
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.286 | 0.412 | 0.350 |
-| semantic_embed | 0.014 | 0.036 | 0.033 |
-| scalar_htema | 0.277 | 0.439 | 0.357 |
-| neural_mira | 0.509 | 0.677 | 0.587 |
+| bm25 | 0.457 | 0.596 | 0.534 |
+| semantic_embed | 0.020 | 0.056 | 0.051 |
+| dense_semantic | 0.033 | 0.091 | 0.070 |
+| scalar_htema | 0.427 | 0.636 | 0.528 |
+| neural_mira | 0.826 | 0.962 | 0.885 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.379 | 0.271 | 0.610 |
-| semantic_embed | 0.034 | 0.019 | 0.124 |
-| scalar_htema | 0.396 | 0.314 | 0.215 |
-| neural_mira | 0.573 | 0.572 | 0.870 |
+| bm25 | 0.380 | 0.591 | 0.683 |
+| semantic_embed | 0.038 | 0.073 | 0.035 |
+| dense_semantic | 0.053 | 0.087 | 0.066 |
+| scalar_htema | 0.578 | 0.522 | 0.455 |
+| neural_mira | 0.820 | 0.912 | 0.946 |
 
-Calibration: neural=1.60, bm25=0.00, semantic=0.00, scalar=0.10, dev_calibration_mrr=0.54
+Calibration: neural=1.60, bm25=0.00, semantic=0.00, dense=0.00, scalar=0.20, dev_calibration_mrr=0.85
 
 ## month_holdout
 
-Train examples: 2494; test examples: 506
+Train examples: 1547; test examples: 253
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.259 | 0.364 | 0.317 |
-| semantic_embed | 0.012 | 0.042 | 0.031 |
-| scalar_htema | 0.318 | 0.474 | 0.396 |
-| neural_mira | 0.478 | 0.646 | 0.559 |
+| bm25 | 0.391 | 0.498 | 0.457 |
+| semantic_embed | 0.004 | 0.032 | 0.035 |
+| dense_semantic | 0.016 | 0.067 | 0.051 |
+| scalar_htema | 0.435 | 0.680 | 0.551 |
+| neural_mira | 0.767 | 0.945 | 0.844 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.368 | 0.230 | 0.177 |
-| semantic_embed | 0.043 | 0.008 | 0.028 |
-| scalar_htema | 0.439 | 0.326 | 0.239 |
-| neural_mira | 0.585 | 0.511 | 0.548 |
+| bm25 | 0.403 | 0.504 | 0.522 |
+| semantic_embed | 0.036 | 0.035 | 0.011 |
+| dense_semantic | 0.051 | 0.052 | 0.010 |
+| scalar_htema | 0.556 | 0.558 | 0.210 |
+| neural_mira | 0.806 | 0.874 | 1.000 |
 
-Calibration: neural=2.00, bm25=0.10, semantic=0.00, scalar=0.35, dev_calibration_mrr=0.55
+Calibration: neural=2.00, bm25=0.00, semantic=0.00, dense=0.35, scalar=0.50, dev_calibration_mrr=0.88
 
 ## style_holdout
 
-Train examples: 2815; test examples: 185
+Train examples: 1382; test examples: 418
 
 | Model | R@1 | R@5 | MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.054 | 0.114 | 0.095 |
-| semantic_embed | 0.000 | 0.005 | 0.013 |
-| scalar_htema | 0.292 | 0.643 | 0.450 |
-| neural_mira | 0.389 | 0.724 | 0.535 |
+| bm25 | 0.045 | 0.156 | 0.119 |
+| semantic_embed | 0.010 | 0.038 | 0.040 |
+| dense_semantic | 0.005 | 0.038 | 0.034 |
+| scalar_htema | 0.275 | 0.641 | 0.445 |
+| neural_mira | 0.390 | 0.756 | 0.548 |
 
 | Model | Diary MRR | WhatsApp MRR | Mixed MRR |
 | --- | ---: | ---: | ---: |
-| bm25 | 0.116 | 0.056 | 0.006 |
-| semantic_embed | 0.019 | 0.001 | 0.010 |
-| scalar_htema | 0.494 | 0.367 | 0.295 |
-| neural_mira | 0.491 | 0.608 | 1.000 |
+| bm25 | 0.157 | 0.062 | 0.073 |
+| semantic_embed | 0.067 | 0.001 | 0.002 |
+| dense_semantic | 0.051 | 0.001 | 0.028 |
+| scalar_htema | 0.451 | 0.459 | 0.388 |
+| neural_mira | 0.663 | 0.398 | 0.357 |
 
-Calibration: neural=2.00, bm25=0.00, semantic=0.10, scalar=0.10, dev_calibration_mrr=0.59
+Calibration: neural=2.00, bm25=0.00, semantic=0.15, dense=0.00, scalar=0.00, dev_calibration_mrr=0.92

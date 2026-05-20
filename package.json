@@ -16,6 +16,8 @@
     "honest:mira": "python3 scripts/honest_mira.py",
     "mira:search": "python3 scripts/search_mira.py",
     "eval:gate": "python scripts/eval_gate.py",
+    "reflect": "python3 scripts/reflect.py",
+    "feedback:convert": "python3 scripts/convert_feedback.py",
     "neural:embed": "python3 scripts/build_neural_embeddings.py",
     "neural:train": "python3 scripts/train_neural_htema.py",
     "neural:search": "python3 scripts/search_neural_htema.py",

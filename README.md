@@ -1,12 +1,27 @@
 # Memory Attention Lab
 
-Separate experiment for a personal-memory, Transformer-like retrieval mechanism over diary entries and WhatsApp conversation windows.
+A personal-memory retrieval lab over diary entries, WhatsApp conversation windows,
+hierarchical rollups, sub-day atoms, and reflective patterns. The retrieval core
+is **HTEMA** (Hierarchical Temporal-Emotional Memory Attention) inside the wider
+**MIRA** architecture.
 
-The lab now has three working layers:
+Active retrieval layers:
 
 1. A lightweight deterministic / scalar HTEMA ranker that runs immediately on the local DailyBean diary files.
-2. A leakage-free evaluation harness that compares BM25, dense semantic embeddings, scalar HTEMA, and neural MIRA from query text only.
-3. A neural MIRA ranker that learns over semantic, temporal, emotional, diary-feature, source, participant, continuity, BM25, and dense semantic evidence heads.
+2. A leakage-free evaluation harness that compares BM25, sparse semantic (TF-IDF+LSA), **dense semantic (multilingual MiniLM)**, scalar HTEMA, and neural MIRA from query text only.
+3. A neural MIRA reranker over a 38-dim per-memory pair feature including semantic, temporal, emotional, diary-feature, **dense semantic cosine**, source/participant, continuity, BM25, and pairwise cross interactions.
+
+Active memory hierarchy:
+
+- **Level 2 — day tokens** (diary entries, one per day).
+- **Level 2 — WhatsApp conversation windows** (chunked by date+time gap).
+- **Level 1 — memory atoms** (paragraph-level slices of long diary days; auto-generated via `--include-atoms`).
+- **Level 3 — weekly rollups** and **Level 4 — monthly rollups** (auto-aggregated via `--include-rollups`).
+- **Level 5 — reflection tokens** (mood-streak, theme-arc, contradiction, and identity-pattern summaries from `scripts/reflect.py`, included via `--include-reflections`).
+
+Continuous learning:
+
+- `scripts/convert_feedback.py` converts Jarvis `feedback.jsonl` ratings into eval examples, treating `useful` sources as positives and `wrong`/`needs_work` sources as hard negatives (per the no-self-reinforcement protocol).
 
 ## Idea
 
@@ -185,15 +200,19 @@ Generated JSONL data is ignored by git because it contains private diary-derived
 The main current evaluator is:
 
 ```bash
-python scripts/honest_mira.py --split all --epochs 35 --max-examples 1800 --candidate-top-k 768
+python scripts/honest_mira.py --split all --epochs 35 --max-examples 1800 \
+    --candidate-top-k 768 --include-rollups --include-atoms --include-reflections
 ```
 
-It generates a deterministic personal-memory benchmark from local diary day tokens and WhatsApp conversation windows, then evaluates:
+It generates a deterministic personal-memory benchmark from diary day tokens,
+WhatsApp conversation windows, weekly/monthly rollups, sub-day atoms, and
+Level-5 reflections, then evaluates:
 
 - `bm25`: Okapi BM25 over memory text
-- `semantic_embed`: dense LSA/SVD semantic embeddings over TF-IDF text
-- `scalar_htema`: fixed transparent HTEMA prior
-- `neural_mira`: PyTorch candidate reranker over HTEMA heads, source/participant features, BM25, and dense semantic evidence
+- `semantic_embed`: sparse TF-IDF + LSA semantic embeddings (kept as a sanity baseline)
+- `dense_semantic`: dense multilingual **MiniLM** (`paraphrase-multilingual-MiniLM-L12-v2`) cosine over the same memory pool — works for Turkish-English mixes
+- `scalar_htema`: fixed transparent HTEMA prior over per-pair feature vectors
+- `neural_mira`: PyTorch candidate reranker fusing all of the above plus interaction features (`semantic_x_temporal`, `dense_x_temporal`, `dense_x_entity`, `bm25_x_temporal`, …)
 
 Rules:
 
@@ -205,48 +224,46 @@ Rules:
 - `--candidate-top-k` makes neural evaluation scalable by reranking a transparent candidate pool built from BM25, semantic LSA, and scalar HTEMA.
 - Candidate reranking calibrates neural, BM25, semantic, and scalar scores on the dev split so the final model can fall back toward transparent HTEMA when a held-out query style needs it.
 
-Diary-only honest run before WhatsApp expansion:
+Latest run (2026-05-18) — diary + WhatsApp + rollups + atoms + reflections, dense MiniLM head on:
 
 ```text
-Split: random
-BM25              R@1 0.386   R@5 0.457   MRR 0.432
-Semantic embed    R@1 0.146   R@5 0.269   MRR 0.215
-Scalar HTEMA      R@1 0.582   R@5 0.778   MRR 0.674
-Neural MIRA       R@1 0.595   R@5 0.825   MRR 0.697
-
-Split: month_holdout
-BM25              R@1 0.381   R@5 0.466   MRR 0.435
-Semantic embed    R@1 0.161   R@5 0.302   MRR 0.239
-Scalar HTEMA      R@1 0.563   R@5 0.780   MRR 0.662
-Neural MIRA       R@1 0.607   R@5 0.868   MRR 0.716
-
-Split: style_holdout
-BM25              R@1 0.060   R@5 0.173   MRR 0.132
-Semantic embed    R@1 0.042   R@5 0.147   MRR 0.108
-Scalar HTEMA      R@1 0.266   R@5 0.665   MRR 0.443
-Neural MIRA       R@1 0.320   R@5 0.706   MRR 0.491
-```
-
-Current WhatsApp-expanded corpus:
-
-```text
-Memory tokens: 5950
-Diary tokens: 350
-WhatsApp tokens: 5600
-Generated benchmark examples before cap: 23095
+Memory tokens: 7657 (350 diary, 7098 WhatsApp, 87 rollups, 67 atoms, 55 reflections)
+Generated benchmark examples before cap: 28873
 Default benchmark cap: 1800 stratified examples
 Default neural candidate pool: 768 memories/query
+
+Split: random
+BM25              R@1 0.457   R@5 0.596   MRR 0.534
+Semantic embed    R@1 0.020   R@5 0.056   MRR 0.051
+Dense semantic    R@1 0.033   R@5 0.091   MRR 0.070
+Scalar HTEMA      R@1 0.427   R@5 0.636   MRR 0.528
+Neural MIRA       R@1 0.826   R@5 0.962   MRR 0.885
+
+Split: month_holdout
+BM25              R@1 0.391   R@5 0.498   MRR 0.457
+Semantic embed    R@1 0.004   R@5 0.032   MRR 0.035
+Dense semantic    R@1 0.016   R@5 0.067   MRR 0.051
+Scalar HTEMA      R@1 0.435   R@5 0.680   MRR 0.551
+Neural MIRA       R@1 0.767   R@5 0.945   MRR 0.844
+
+Split: style_holdout
+BM25              R@1 0.045   R@5 0.156   MRR 0.119
+Semantic embed    R@1 0.010   R@5 0.038   MRR 0.040
+Dense semantic    R@1 0.005   R@5 0.038   MRR 0.034
+Scalar HTEMA      R@1 0.275   R@5 0.641   MRR 0.445
+Neural MIRA       R@1 0.390   R@5 0.756   MRR 0.548
 ```
 
-Small warning-as-error smoke run after WhatsApp expansion:
+Notes:
 
-```text
-Split: random, max_examples=120, candidate_top_k=96
-BM25              R@1 0.346   R@5 0.462   MRR 0.415
-Semantic embed    R@1 0.000   R@5 0.115   MRR 0.049
-Scalar HTEMA      R@1 0.423   R@5 0.846   MRR 0.616
-Neural MIRA       R@1 0.500   R@5 0.846   MRR 0.642
-```
+- Calibration weights are learned per-split on the dev set. The dense head
+  is one of the candidate channels and one of the calibration components,
+  not a strict baseline beater on its own — it shines when fused with BM25,
+  scalar HTEMA, and the source/temporal features in the neural reranker.
+- Hierarchical co-positives: a month-level query like "happiest diary days
+  in March 2025" counts the `rollup:month:2025-03` token and any `atom:` of
+  the gold leaves as correct answers. This rewards the model for legitimate
+  surfacing of aggregate memory rather than penalising it.
 
 The generated aggregate report is stored at:
 
@@ -271,20 +288,27 @@ Jarvis stores answer feedback locally in:
 ../jarvis-platform/data/feedback.jsonl
 ```
 
-The converter from feedback to MIRA eval examples is not implemented yet. Add it
-after enough real feedback exists, ideally 30-50 `wrong` / `needs_work` rows with
-clear correction notes.
+Convert ratings into MIRA eval examples:
 
-Target output format:
-
-```json
-{"query":"natural user question","positive_ids":["memory-id"],"style":"real_feedback","source":"jarvis_feedback","note":"why this was corrected"}
+```bash
+python scripts/convert_feedback.py --output data/feedback_eval_examples.jsonl
 ```
 
-Those rows can then be reviewed and passed into `honest_mira.py` with
-`--extra-examples`. Do not auto-label feedback only from the originally retrieved
-sources; that can preserve the exact retrieval mistake the feedback was meant to
-fix.
+Protocol — preserve learning signal without amplifying retrieval bugs:
+
+- `useful` rows: displayed sources are emitted as `positive_ids`.
+- `wrong` / `needs_work` rows: displayed sources are emitted as `negative_ids`.
+  The script looks in the user's `note` for an explicit date or memory id; if
+  one is found it becomes the positive, otherwise the row is skipped (the
+  README's no-self-reinforcement rule).
+
+Then mix the converted examples into the next training run:
+
+```bash
+python scripts/honest_mira.py --split all --epochs 35 --max-examples 1800 \
+    --candidate-top-k 768 --extra-examples data/feedback_eval_examples.jsonl \
+    --include-rollups --include-atoms --include-reflections
+```
 
 Private `.pt` artifacts are tracked in this private repo with Git LFS so the
 model can continue training/generalizing from the latest checkpoint:
@@ -313,6 +337,67 @@ python scripts/search_mira.py "sad and anxious days in May 2025" --limit 8 --jso
 ```
 
 For date-bound questions, `search_mira.py` applies a temporal candidate filter by default. Pass `--include-out-of-window` when you explicitly want emotionally/semantically similar memories outside the parsed date window.
+
+## Dense Semantic Head
+
+Cached multilingual MiniLM embeddings live in `data/neural_embeddings.pt`.
+Rebuild after expanding the corpus (e.g. new WhatsApp exports, new reflections,
+new diary entries):
+
+```bash
+python scripts/build_neural_embeddings.py --batch-size 128 --device cuda:0 \
+    --include-rollups --include-atoms --include-reflections
+```
+
+When `honest_mira.py` / `search_mira.py` / `mira_service.py` start, they detect
+the cache, verify that `memory_ids` matches the current corpus, and reuse the
+embeddings directly. When the corpus drifts (new memories, no rebuild yet),
+they fall back to fresh encoding on first call.
+
+Disable the dense head for ablation:
+
+```bash
+python scripts/honest_mira.py --no-dense
+```
+
+## Hierarchy: Rollups, Atoms, Reflections
+
+The HTEMA design has five levels. The lab now generates all of them from
+deterministic rules:
+
+| Level | Source type | Builder |
+| --- | --- | --- |
+| 1 | `atom` | `htema_core.build_memory_atoms` (paragraph splits of long diary days) |
+| 2 | `diary` | `parse_diary_memories` |
+| 2 | `whatsapp` | `parse_whatsapp_memories` |
+| 3 | `rollup_week` | `htema_core.build_rollup_memories` |
+| 4 | `rollup_month` | `htema_core.build_rollup_memories` |
+| 5 | `reflection` | `scripts/reflect.py` (mood streaks, theme arcs, contradictions, identity patterns) |
+
+Generate Level-5 reflection tokens once after major corpus changes:
+
+```bash
+python scripts/reflect.py
+```
+
+That writes `data/reflections.jsonl`. The reflection schema is intentionally
+auditable (no LLM is invoked) — every reflection lists its `source_ids` so a
+human can trace why it was emitted.
+
+## Date Parser
+
+`htema_core.parse_time_window` resolves natural language windows in both
+English and Turkish:
+
+- Explicit dates: `2024.06.01`, `between 2024-06-01 and 2024-06-15`
+- Year + month name: `March 2025`, `Mart 2025`, `Mayıs 2025`
+- Seasons: `spring 2024`, `ilkbahar 2024`, `last summer`, `geçen yaz`
+- Year + phase: `late 2024`, `2024 sonu`, `first half of 2025`, `early 2023`, `2023 başı`
+- Relative: `today`, `yesterday`, `bugün`, `dün`, `this week`, `geçen ay`, `last year`, `bu sene`
+- Bare year: `2024`
+
+Pass a reference date via `parse_time_window(query, now=...)` for deterministic
+relative-date tests.
 
 ## Neural Q/K/V HTEMA
 
