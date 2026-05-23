@@ -1,27 +1,29 @@
 # Memory Attention Lab
 
-A personal-memory retrieval lab over diary entries, WhatsApp conversation windows,
-hierarchical rollups, sub-day atoms, and reflective patterns. The retrieval core
-is **HTEMA** (Hierarchical Temporal-Emotional Memory Attention) inside the wider
-**MIRA** architecture.
+Research lab for personal-memory retrieval over diary entries, WhatsApp conversation windows, hierarchical rollups, sub-day atoms, and reflective patterns. The retrieval core is **HTEMA** (Hierarchical Temporal-Emotional Memory Attention) inside the wider **MIRA** (Memory, Introspection, Reflection Architecture).
 
-Active retrieval layers:
+The trained Neural MIRA checkpoint produced here is what [`../jarvis-platform/`](../jarvis-platform/) loads in its `mira_service.py` sidecar to back the `temporal_memory_search` chat tool. The lab also feeds [`../mira-platform/`](../mira-platform/) when its `use_mira` search flag is on.
 
-1. A lightweight deterministic / scalar HTEMA ranker that runs immediately on the local DailyBean diary files.
-2. A leakage-free evaluation harness that compares BM25, sparse semantic (TF-IDF+LSA), **dense semantic (multilingual MiniLM)**, scalar HTEMA, and neural MIRA from query text only.
-3. A neural MIRA reranker over a 38-dim per-memory pair feature including semantic, temporal, emotional, diary-feature, **dense semantic cosine**, source/participant, continuity, BM25, and pairwise cross interactions.
+## What's in here
 
-Active memory hierarchy:
+**Three retrieval layers**, run side-by-side in the honest benchmark for ablation:
 
-- **Level 2 — day tokens** (diary entries, one per day).
-- **Level 2 — WhatsApp conversation windows** (chunked by date+time gap).
-- **Level 1 — memory atoms** (paragraph-level slices of long diary days; auto-generated via `--include-atoms`).
-- **Level 3 — weekly rollups** and **Level 4 — monthly rollups** (auto-aggregated via `--include-rollups`).
-- **Level 5 — reflection tokens** (mood-streak, theme-arc, contradiction, and identity-pattern summaries from `scripts/reflect.py`, included via `--include-reflections`).
+1. Scalar HTEMA — lightweight deterministic ranker over per-pair feature vectors. Transparent, no training needed.
+2. Leakage-free evaluation harness comparing BM25, sparse semantic (TF-IDF+LSA), dense semantic (multilingual MiniLM), scalar HTEMA, and Neural MIRA — all from query text only.
+3. Neural MIRA reranker — PyTorch model over a 38-dim per-memory pair feature (semantic, temporal, emotional, diary-feature, dense cosine, source/participant, continuity, BM25, and pairwise interactions).
 
-Continuous learning:
+**Five-level memory hierarchy**, all generated deterministically (no LLM in the pipeline):
 
-- `scripts/convert_feedback.py` converts Jarvis `feedback.jsonl` ratings into eval examples, treating `useful` sources as positives and `wrong`/`needs_work` sources as hard negatives (per the no-self-reinforcement protocol).
+| Level | Source type | Builder |
+|--|--|--|
+| 1 | `atom` | `htema_core.build_memory_atoms` (paragraph splits of long diary days) |
+| 2 | `diary` | `parse_diary_memories` |
+| 2 | `whatsapp` | `parse_whatsapp_memories` |
+| 3 | `rollup_week` | `htema_core.build_rollup_memories` |
+| 4 | `rollup_month` | `htema_core.build_rollup_memories` |
+| 5 | `reflection` | `scripts/reflect.py` (mood streaks, theme arcs, contradictions, identity patterns) |
+
+**Continuous learning loop**: `scripts/convert_feedback.py` converts Jarvis feedback into eval examples, treating `useful` sources as positives and `wrong`/`needs_work` as hard negatives (no-self-reinforcement protocol — the note must contain an explicit correction id for a row to count as a positive, else skip).
 
 ## Idea
 
@@ -78,28 +80,23 @@ The script reads:
 ../knowledge_base/Deniz/diary/dailybean_2025_complete.md
 ```
 
-## Where This Fits Later
+## How this fits into the rest of the repo
 
-This can become a Jarvis memory layer:
+The trained Neural MIRA reranker is consumed by two host applications:
 
-1. Keep Qdrant for vector search.
-2. Add temporal and emotional payload fields to each chunk.
-3. Use this attention scorer as a reranker after initial retrieval.
-4. Add a `temporal_memory_search` tool that returns ranked days with attention-head explanations.
-5. Later replace deterministic projections with learned linear layers or a small cross-encoder reranker once enough preference data exists.
+- **`../jarvis-platform/scripts/mira_service.py`** — local sidecar (port 4122) that the Jarvis chat tool `temporal_memory_search` calls into. Loads `data/neural_mira_model.pt` at startup; falls back to scalar HTEMA when the dense head isn't useful for a given query style.
+- **`../mira-platform/`** — SaaS host's `use_mira` search flag routes through the same retrieval logic, just with per-tenant collections instead of one shared corpus.
+
+If you change the feature set or model architecture, the consumers will need a matching update — the checkpoint shape is the contract.
 
 ## MIRA / HTEMA
 
-The broader architecture is documented in [docs/mira_htema_design.md](docs/mira_htema_design.md).
-
-Short version:
-
 ```text
-MIRA = Memory, Introspection, Reflection Architecture
+MIRA  = Memory, Introspection, Reflection Architecture
 HTEMA = Hierarchical Temporal-Emotional Memory Attention
 ```
 
-MIRA is the diary-native memory system. HTEMA is the attention/reranking core that learns how to attend over day, atom, week, month, event, and identity-pattern tokens.
+MIRA is the diary-native memory system. HTEMA is the attention/reranking core that learns how to attend over day, atom, week, month, event, and identity-pattern tokens. Full design notes in [`docs/mira_htema_design.md`](docs/mira_htema_design.md).
 
 ## Generate Synthetic Query Training Data
 
