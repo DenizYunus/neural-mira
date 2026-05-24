@@ -186,6 +186,35 @@ FEATURE_NAMES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Source-trust priors
+# ---------------------------------------------------------------------------
+# The neural reranker scores memories on their own merits (semantic, temporal,
+# emotional features). These weights layer a *trust prior* on top of the final
+# score so high-fidelity sources (Deniz's own diary words) beat lower-fidelity
+# sources (LLM-summarized WhatsApp days) when they're similarly relevant.
+#
+# Applied as a post-rerank multiplier in mira_service / search_mira so we
+# don't have to retrain the model whenever the policy changes.
+SOURCE_WEIGHTS: dict[str, float] = {
+    "diary": 1.0,              # primary source-of-truth — Deniz's own words
+    "whatsapp": 1.0,           # raw conversation windows are first-class evidence
+    "atom": 0.95,              # paragraph slice of a diary day — same fidelity, smaller window
+    "reflection": 0.9,         # deterministic-rule reflections, slightly abstracted
+    "rollup_week": 0.85,       # aggregated context — useful but less specific
+    "rollup_month": 0.75,
+    "whatsapp_synthetic": 0.3, # LLM-summarized WhatsApp day — lowest trust, surfaces only when
+                               # nothing better exists for the date. ALWAYS render with a "AI-summarized"
+                               # badge so the user knows these aren't their own words.
+}
+
+
+def source_weight(source_type: str) -> float:
+    """Return the trust multiplier for a memory source. Unknown sources default
+    to 1.0 — we'd rather over-trust than silently drop a new memory kind."""
+    return SOURCE_WEIGHTS.get(source_type, 1.0)
+
+
 @dataclass(frozen=True)
 class DiaryMemory:
     entry_id: str
@@ -205,6 +234,13 @@ class DiaryMemory:
     unresolved: float
     source_type: str = "diary"
     participants: tuple[str, ...] = ()
+    # Provenance for derived memories (whatsapp_synthetic, future LLM-generated
+    # sources). Empty for organic memories. ``provenance_kind`` describes what
+    # was summarized ("messages", "rollup_window", ...); ``provenance_excerpts``
+    # carries 1-2 verbatim source snippets the UI can render as receipts so a
+    # reader can audit any synthesized claim.
+    provenance_kind: str | None = None
+    provenance_excerpts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -574,6 +610,8 @@ def parse_all_memories(
     *,
     include_rollups: bool = False,
     include_atoms: bool = False,
+    include_whatsapp_synthetic: bool | None = None,
+    whatsapp_synthetic_path: Path | None = None,
     rollup_max_text: int = 1800,
     atom_min_chars: int = 80,
     atom_max_chars: int = 700,
@@ -584,6 +622,10 @@ def parse_all_memories(
     that aggregate child diary days. When `include_atoms` is True, append
     paragraph-level memory atoms split out of long diary days. Both kinds carry
     distinct `source_type` values so the source-feature head can attend to them.
+
+    `include_whatsapp_synthetic` controls whether LLM-summarized WhatsApp
+    fallback diaries are included. Default ``None`` = auto: include them iff
+    the JSONL file exists. Pass True/False to force the choice.
     """
     diary = parse_diary_memories(diary_files)
     whatsapp = parse_whatsapp_memories(whatsapp_root)
@@ -593,6 +635,16 @@ def parse_all_memories(
         extras.extend(build_memory_atoms(diary, min_chars=atom_min_chars, max_chars=atom_max_chars))
     if include_rollups:
         extras.extend(build_rollup_memories(diary, max_text=rollup_max_text))
+
+    synthetic_path = whatsapp_synthetic_path or WHATSAPP_SYNTHETIC_DEFAULT
+    include_synth = (
+        include_whatsapp_synthetic
+        if include_whatsapp_synthetic is not None
+        else synthetic_path.exists()
+    )
+    if include_synth:
+        extras.extend(load_whatsapp_synthetic_memories(synthetic_path))
+
     return sorted(combined + extras, key=lambda item: item.ordinal)
 
 
@@ -830,6 +882,96 @@ def build_memory_atoms(
 
 
 REFLECTIONS_DEFAULT = LAB_ROOT / "data" / "reflections.jsonl"
+WHATSAPP_SYNTHETIC_DEFAULT = LAB_ROOT / "data" / "whatsapp_synthetic_diaries.jsonl"
+
+
+def load_whatsapp_synthetic_memories(path: Path | None = None) -> list[DiaryMemory]:
+    """Load LLM-summarized WhatsApp fallback diaries from JSONL.
+
+    Each row was emitted by ``scripts/synthesize_whatsapp_diaries.py`` and
+    contains: summary, claims, provenance_excerpts, participants. We rehydrate
+    these into ``DiaryMemory`` objects with ``source_type="whatsapp_synthetic"``
+    so they slot into the same memory pool as diary and WhatsApp windows. The
+    search layer's ``SOURCE_WEIGHTS`` knocks them down to 0.3x so they only
+    surface when nothing better exists for the date.
+
+    The synthesized ``text`` interleaves the summary, the explicit claims (as
+    a bullet list), and the verbatim provenance excerpts. The excerpts are
+    what makes any rendered output auditable — every claim sits next to the
+    actual source words.
+    """
+    path = path or WHATSAPP_SYNTHETIC_DEFAULT
+    if not path.exists():
+        return []
+    out: list[DiaryMemory] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        date_iso = row.get("date")
+        summary = row.get("summary")
+        excerpts = row.get("provenance_excerpts") or []
+        if not (isinstance(date_iso, str) and isinstance(summary, str) and summary.strip()):
+            continue
+        if not isinstance(excerpts, list) or not any(
+            isinstance(e, str) and e.strip() for e in excerpts
+        ):
+            # Refuse to load a row with no receipts. Either the synthesizer
+            # output was malformed or the entry was hand-edited away from the
+            # provenance discipline; either way we'd rather drop it than
+            # silently surface a claim without a verifiable quote.
+            continue
+        normalized = normalize_date(date_iso)
+        if not normalized:
+            continue
+
+        claims = [c for c in (row.get("claims") or []) if isinstance(c, str) and c.strip()]
+        participants = tuple(
+            sorted({p for p in (row.get("participants") or []) if isinstance(p, str)})
+        )
+
+        # Interleave so the retrieval text contains both the paraphrase and
+        # the verbatim receipts. The "[WhatsApp-derived]" prefix also ends up
+        # in any embedding so semantic search can detect the source style.
+        text_parts = ["[WhatsApp-derived, AI-summarized]", summary.strip()]
+        if claims:
+            text_parts.append("Specific claims: " + " | ".join(claims))
+        text_parts.append(
+            "Source excerpts: "
+            + " || ".join(e.strip() for e in excerpts if isinstance(e, str) and e.strip())
+        )
+        text_block = "\n".join(text_parts)
+        tokens = tuple(tokenize(text_block))
+
+        year_part, month_part, _day = (int(part) for part in normalized.split("-"))
+        out.append(DiaryMemory(
+            entry_id=str(row.get("id") or f"whatsapp_synthetic:{normalized}"),
+            date=normalized,
+            ordinal=ordinal(normalized),
+            year=year_part,
+            month=month_part,
+            source_path=str(path),
+            mood=None,                                # LLM-summarized; no scored mood
+            icons=(),
+            text=text_block,
+            tokens=tokens,
+            token_vector=vectorize(tokens),
+            emotion=emotion_vector(None, (), text_block),
+            diary_features=diary_feature_vector(text_block),
+            importance=0.4,                           # below diary (varies), above generic
+            unresolved=0.0,
+            source_type="whatsapp_synthetic",
+            participants=participants,
+            provenance_kind="messages",
+            provenance_excerpts=tuple(
+                e.strip() for e in excerpts if isinstance(e, str) and e.strip()
+            ),
+        ))
+    return out
 
 
 def load_reflections(path: Path | None = None) -> list[DiaryMemory]:
