@@ -1,8 +1,19 @@
-# Memory Attention Lab
+# Neural MIRA
 
-Research lab for personal-memory retrieval over diary entries, WhatsApp conversation windows, hierarchical rollups, sub-day atoms, and reflective patterns. The retrieval core is **HTEMA** (Hierarchical Temporal-Emotional Memory Attention) inside the wider **MIRA** (Memory, Introspection, Reflection Architecture).
+Neural attention head for personal recall. Trains on diary entries to learn temporal, source-trust, and relevance-aware ranking.
 
-The trained Neural MIRA checkpoint produced here is what [`../jarvis-platform/`](../jarvis-platform/) loads in its `mira_service.py` sidecar to back the `temporal_memory_search` chat tool. The lab also feeds [`../mira-platform/`](../mira-platform/) when its `use_mira` search flag is on.
+## Why
+
+Generic retrieval-augmented systems treat "find me my notes about X" the same as "find me a Wikipedia article about X" — a single vector-similarity sort over a flat document store. That works for facts. It fails for *autobiographical* memory, where the right answer depends on:
+
+- **When** something happened (Did I mean last week, last year, "around the move"?)
+- **Where** the trace lives (a polished diary entry is higher signal than a WhatsApp message; an LLM-summarized day is lower signal than either)
+- **Who** was involved (people, places, recurring themes)
+- **What state** I was in (mood, the surrounding week, what came before)
+
+Neural MIRA is a small attention head trained to fuse all of those signals — and the dense semantic match — into a single ranking. It rides on top of a transparent feature pipeline (BM25, scalar HTEMA, MiniLM dense vectors, source-trust priors, temporal proximity) so you can see *why* a memory was surfaced, not just *that* it was.
+
+> Originated as the research arm of a larger personal-memory system; the cross-references to "jarvis-platform" and "mira-platform" below point at the original parent project (not included here). The code in this repo is generic — point it at any directory of dated Markdown entries to train your own version.
 
 ## What's in here
 
@@ -61,33 +72,49 @@ The output is a ranked set of memory values, plus per-head scores so we can insp
 
 The prototype also includes a small alias layer for personal and multilingual matching. For example, `Cappadocia` expands toward `Kapadokya` and `Nevsehir`, so English queries can still find Turkish diary text.
 
+## Setup
+
+1. **Clone** and install Python deps:
+
+   ```bash
+   git clone https://github.com/DenizYunus/neural-mira.git
+   cd neural-mira
+   pip install -r requirements-neural.txt
+   ```
+
+2. **Copy the config** and edit values:
+
+   ```bash
+   cp .env.example .env
+   # Open .env, set LLM_API_KEY if you'll run synthesis scripts.
+   # Defaults assume your diaries live in ./data/diaries/*.md
+   ```
+
+3. **Drop your diaries** into `data/diaries/`:
+
+   ```bash
+   mkdir -p data/diaries
+   # See data/README.md for the expected markdown format.
+   ```
+
 ## Run
 
-From the repository root:
-
 ```bash
-cd memory-attention-lab
 npm run demo -- "happiest days at the end of 2024"
 npm run query -- "what changed around the cappadocia trip" -- --limit 8
 npm run query -- "sad and anxious days in March 2025" -- --json
 ```
 
-The script reads:
+The Node-side query script auto-discovers every `*.md` file in `data/diaries/` (or pin a specific subset via `DIARY_FILES=foo.md,bar.md` in `.env`).
 
-```text
-../knowledge_base/Deniz/diary/dailybean_2023_complete.md
-../knowledge_base/Deniz/diary/dailybean_2024_complete.md
-../knowledge_base/Deniz/diary/dailybean_2025_complete.md
-```
+## How this was originally deployed
 
-## How this fits into the rest of the repo
+The trained checkpoint was originally consumed by two host applications in the parent project (not included in this repo):
 
-The trained Neural MIRA reranker is consumed by two host applications:
+- **`jarvis-platform/scripts/mira_service.py`** — local sidecar (port 4122) that a chat tool called into. Loaded `data/neural_mira_model.pt` at startup; fell back to scalar HTEMA when the dense head wasn't useful for a given query style.
+- **`mira-platform/`** — SaaS host that routed search requests through the same retrieval logic with per-tenant collections instead of one shared corpus.
 
-- **`../jarvis-platform/scripts/mira_service.py`** — local sidecar (port 4122) that the Jarvis chat tool `temporal_memory_search` calls into. Loads `data/neural_mira_model.pt` at startup; falls back to scalar HTEMA when the dense head isn't useful for a given query style.
-- **`../mira-platform/`** — SaaS host's `use_mira` search flag routes through the same retrieval logic, just with per-tenant collections instead of one shared corpus.
-
-If you change the feature set or model architecture, the consumers will need a matching update — the checkpoint shape is the contract.
+If you change the feature set or model architecture, downstream consumers need a matching update — the checkpoint shape is the contract.
 
 ## MIRA / HTEMA
 
@@ -100,13 +127,7 @@ MIRA is the diary-native memory system. HTEMA is the attention/reranking core th
 
 ## Generate Synthetic Query Training Data
 
-The generator reads the existing Jarvis `.env`:
-
-```text
-../jarvis-platform/.env
-```
-
-and uses `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` as an OpenAI-compatible API.
+The generator reads `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` from `neural-mira/.env`. Any OpenAI-compatible chat-completions endpoint works.
 
 ```bash
 python3 scripts/generate_training_queries.py --limit 5
@@ -279,11 +300,7 @@ are caught before a checkpoint becomes the active Jarvis model.
 
 ## Feedback-Derived Eval Cases
 
-Jarvis stores answer feedback locally in:
-
-```text
-../jarvis-platform/data/feedback.jsonl
-```
+If your downstream UI captures thumbs-up/down on retrieved memories, point `FEEDBACK_PATH` in `.env` at that log (default `./data/feedback.jsonl` — see [`data/README.md`](data/README.md) for the expected schema).
 
 Convert ratings into MIRA eval examples:
 
@@ -307,23 +324,16 @@ python scripts/honest_mira.py --split all --epochs 35 --max-examples 1800 \
     --include-rollups --include-atoms --include-reflections
 ```
 
-Private `.pt` artifacts are tracked in this private repo with Git LFS so the
-model can continue training/generalizing from the latest checkpoint:
+Trained `.pt` artifacts live under `data/` and are gitignored — model weights trained on personal diaries can leak content via membership-inference and shouldn't be in a shared repo. Expected outputs:
 
 ```text
-data/neural_embeddings.pt
-data/neural_htema_model.pt
-data/neural_mira_model.pt
+data/neural_embeddings.pt       # cached MiniLM embeddings (rebuild per corpus change)
+data/neural_htema_model.pt      # legacy Q/K/V adapter
+data/neural_mira_model.pt       # current honest MIRA reranker
+data/neural_mira_metrics.json   # eval metrics
 ```
 
-These files are not intended to contain raw diary or chat text, but they are
-still private-derived model state. Keep them inside the private repo boundary.
-
-Generated metric JSON remains local:
-
-```text
-data/neural_mira_metrics.json
-```
+If you train your own checkpoint and want to share it, publish via GitHub Releases or Hugging Face Hub rather than pushing the `.pt` files directly.
 
 Search with the trained neural MIRA ranker:
 

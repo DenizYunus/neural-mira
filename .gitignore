@@ -1,8 +1,24 @@
-data/*.jsonl
-data/*.npy
-data/*.npz
-data/baseline_report*.json
-data/neural_*.json
+# --- User-data side: never commit personal content -------------------------
+# Everything inside data/ is yours and stays local. Track only the README +
+# .gitkeep so the directory structure exists in the repo for new clones.
+data/*
+!data/.gitkeep
+!data/README.md
+
+# --- Local config -----------------------------------------------------------
+# .env contains your LLM_API_KEY etc. — keep it out of the repo.
+.env
+.env.local
+
+# --- Build / runtime --------------------------------------------------------
 .venv/
+node_modules/
 __pycache__/
 *.pyc
+*.pyo
+
+# --- Editor / OS noise ------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

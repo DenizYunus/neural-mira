@@ -46,10 +46,9 @@ from htema_core import (
     parse_diary_memories,
     parse_whatsapp_memories,
 )
+from nm_config import llm_env_dict, require_llm_api_key
 
 
-REPO_ROOT = LAB_ROOT.parent
-JARVIS_ENV = REPO_ROOT / "jarvis-platform" / ".env"
 DEFAULT_OUTPUT = LAB_ROOT / "data" / "whatsapp_synthetic_diaries.jsonl"
 
 # Below this many message windows on a date, skip — too thin to summarize
@@ -65,29 +64,11 @@ MAX_PROMPT_MESSAGE_CHARS = 4500
 
 
 # ---------------------------------------------------------------------------
-# Env loader — reuse jarvis-platform/.env so credentials aren't duplicated.
+# Env loader — delegates to nm_config (single source of truth across scripts).
+# Kept as a thin wrapper so the call sites below don't need to change.
 # ---------------------------------------------------------------------------
 def load_jarvis_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not JARVIS_ENV.exists():
-        return env
-    for line in JARVIS_ENV.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env[key.strip()] = value.strip().strip('"').strip("'")
-    # Also overlay process env so a CLI override wins.
-    for key in (
-        "LLM_BASE_URL",
-        "LLM_MODEL",
-        "LLM_API_KEY",
-        "NVIDIA_API_KEY",
-        "LLM_TIMEOUT_MS",
-    ):
-        if os.environ.get(key):
-            env[key] = os.environ[key]
-    return env
+    return llm_env_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +170,8 @@ def call_llm(
     api_key = env.get("LLM_API_KEY") or env.get("NVIDIA_API_KEY")
     model = env.get("LLM_MODEL", "moonshotai/kimi-k2-thinking")
     if not api_key:
-        raise RuntimeError("LLM_API_KEY (or NVIDIA_API_KEY) is required in jarvis-platform/.env")
+        # Centralized friendly error pointing at neural-mira/.env.
+        require_llm_api_key()
 
     body = {
         "model": model,
@@ -412,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not (env.get("LLM_API_KEY") or env.get("NVIDIA_API_KEY")):
         print(
             "synthesize_whatsapp_diaries: LLM_API_KEY (or NVIDIA_API_KEY) is required. "
-            "Set it in jarvis-platform/.env.",
+            "Set it in neural-mira/.env (see .env.example).",
             file=sys.stderr,
         )
         return 2

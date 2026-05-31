@@ -1,16 +1,17 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, '..', '..');
-const diaryRoot = path.join(repoRoot, 'knowledge_base', 'Deniz', 'diary');
+import { LAB_ROOT_PATH, DIARY_ROOT, diaryFiles } from './nm_config.mjs';
 
-const DEFAULT_FILES = [
-  'dailybean_2023_complete.md',
-  'dailybean_2024_complete.md',
-  'dailybean_2025_complete.md'
-].map((file) => path.join(diaryRoot, file));
+// `repoRoot` is kept as the base for relative-path reporting in sourcePath
+// fields. In the standalone repo it points at the lab root; downstream
+// consumers don't care about the absolute prefix, only the relative shape.
+const repoRoot = LAB_ROOT_PATH;
+const diaryRoot = DIARY_ROOT;
+
+// File list is discovered at import time from DIARY_ROOT (or DIARY_FILES env
+// override). See src/nm_config.mjs and .env.example for details.
+const DEFAULT_FILES = diaryFiles();
 
 const MONTHS = {
   january: 1,

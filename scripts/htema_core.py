@@ -10,17 +10,19 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+# All paths come from the single config module — DIARY_ROOT, WHATSAPP_ROOT,
+# and the discovered file list. See scripts/nm_config.py and .env.example.
+from nm_config import (  # noqa: E402  (config import must precede usage)
+    DIARY_ROOT,
+    LAB_ROOT,
+    WHATSAPP_ROOT,
+    diary_files,
+)
 
-LAB_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = LAB_ROOT.parent
-DIARY_ROOT = REPO_ROOT / "knowledge_base" / "Deniz" / "diary"
-WHATSAPP_ROOT = REPO_ROOT / "knowledge_base" / "chunks-manager" / "whatsapp-chunks"
 
-DIARY_FILES = [
-    DIARY_ROOT / "dailybean_2023_complete.md",
-    DIARY_ROOT / "dailybean_2024_complete.md",
-    DIARY_ROOT / "dailybean_2025_complete.md",
-]
+# DIARY_FILES is evaluated at import time; override via DIARY_FILES env var or
+# by dropping .md files into DIARY_ROOT.
+DIARY_FILES = diary_files()
 
 MONTHS = {
     # English
@@ -383,7 +385,7 @@ def parse_diary_memories(files: list[Path] | None = None) -> list[DiaryMemory]:
             mood = parse_mood(part)
             icons = parse_icons(part)
             tokens = tuple(tokenize(part))
-            rel_path = str(file_path.relative_to(REPO_ROOT))
+            rel_path = str(file_path.relative_to(LAB_ROOT)) if file_path.is_relative_to(LAB_ROOT) else str(file_path)
             year, month, _ = (int(value) for value in normalized.split("-"))
             memories.append(
                 DiaryMemory(
@@ -577,7 +579,7 @@ def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> l
                 year, month, _ = (int(v) for v in window_date.split("-"))
                 mood = _infer_whatsapp_mood(combined_text)
                 icons_tuple: tuple[str, ...] = ()
-                rel_path = str(txt_file.relative_to(REPO_ROOT))
+                rel_path = str(txt_file.relative_to(LAB_ROOT)) if txt_file.is_relative_to(LAB_ROOT) else str(txt_file)
 
                 memories.append(
                     DiaryMemory(

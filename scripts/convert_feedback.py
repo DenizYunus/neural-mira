@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Convert Jarvis feedback into MIRA eval examples.
+"""Convert search-feedback annotations into MIRA eval examples.
 
 Pipeline:
-  jarvis-platform/data/feedback.jsonl
+  <FEEDBACK_PATH>                          (configured in .env)
       ↓ (this script)
-  memory-attention-lab/data/feedback_eval_examples.jsonl
+  data/feedback_eval_examples.jsonl
       ↓ (--extra-examples)
   scripts/honest_mira.py
+
+The input feedback log is a JSONL produced by whatever consumer surfaces MIRA
+results to a user (the original Jarvis frontend, your own UI, a CLI eval
+loop). Each row carries: a query string, the source ids/paths the system
+returned, a rating (useful / wrong / needs_work), and an optional free-text
+note. See `feedbackStore.mjs` in the parent project (not included here) for
+the capture-side schema reference.
 
 Rules — preserve learning signal without amplifying retrieval bugs:
 
@@ -33,10 +40,10 @@ from pathlib import Path
 from typing import Any
 
 from htema_core import LAB_ROOT, parse_all_memories
+from nm_config import FEEDBACK_PATH
 
 
-REPO_ROOT = LAB_ROOT.parent
-DEFAULT_FEEDBACK = REPO_ROOT / "jarvis-platform" / "data" / "feedback.jsonl"
+DEFAULT_FEEDBACK = FEEDBACK_PATH
 DEFAULT_OUTPUT = LAB_ROOT / "data" / "feedback_eval_examples.jsonl"
 
 DATE_RE = re.compile(r"(20\d{2})[./-](\d{1,2})[./-](\d{1,2})")

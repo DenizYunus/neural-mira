@@ -2,10 +2,8 @@
 """
 Generate weak-supervision query examples for MIRA / HTEMA.
 
-This script reads the OpenAI-compatible LLM config from:
-  ../jarvis-platform/.env
-
-It intentionally does not print API keys or full diary entries.
+Reads diary path + LLM credentials from `.env` via `nm_config`.
+Intentionally never prints API keys or full diary entries.
 """
 
 from __future__ import annotations
@@ -23,18 +21,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nm_config import (
+    DIARY_ROOT,
+    LAB_ROOT,
+    LLM_BASE_URL,
+    LLM_MODEL,
+    LLM_API_KEY,
+    diary_files,
+)
 
-LAB_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = LAB_ROOT.parent
-JARVIS_ENV = REPO_ROOT / "jarvis-platform" / ".env"
-DIARY_ROOT = REPO_ROOT / "knowledge_base" / "Deniz" / "diary"
+
 DEFAULT_OUTPUT = LAB_ROOT / "data" / "generated_queries.jsonl"
-
-DIARY_FILES = [
-    DIARY_ROOT / "dailybean_2023_complete.md",
-    DIARY_ROOT / "dailybean_2024_complete.md",
-    DIARY_ROOT / "dailybean_2025_complete.md",
-]
+DIARY_FILES = diary_files()
 
 
 @dataclass
@@ -106,7 +104,7 @@ def parse_diary_entries(files: list[Path] = DIARY_FILES) -> list[DiaryEntry]:
             date = normalize_date(part[:120])
             if not date:
                 continue
-            rel_path = str(file_path.relative_to(REPO_ROOT))
+            rel_path = str(file_path.relative_to(LAB_ROOT)) if file_path.is_relative_to(LAB_ROOT) else str(file_path)
             entries.append(
                 DiaryEntry(
                     entry_id=f"{rel_path}:{date}",
@@ -407,16 +405,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Do not call the API; write prompt previews as JSONL.")
     parser.add_argument("--timeout", type=int, default=90, help="API timeout in seconds.")
     parser.add_argument("--temperature", type=float, default=0.7, help="Generation temperature.")
-    parser.add_argument("--env", type=Path, default=JARVIS_ENV, help="Path to Jarvis .env.")
+    parser.add_argument("--env", type=Path, default=None, help="(Deprecated) Path to a .env file. Defaults to neural-mira/.env via nm_config.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    env = {**load_env_file(args.env), **os.environ}
-    base_url = env.get("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    model = env.get("LLM_MODEL", "deepseek-chat")
-    api_key = env.get("LLM_API_KEY") or env.get("DEEPSEEK_API_KEY") or env.get("NVIDIA_API_KEY")
+    # nm_config has already loaded neural-mira/.env at import time; a --env
+    # override is honored by re-overlaying its values on top.
+    base_url = LLM_BASE_URL
+    model = LLM_MODEL
+    api_key = LLM_API_KEY
+    if args.env:
+        overlay = load_env_file(args.env)
+        base_url = overlay.get("LLM_BASE_URL", base_url)
+        model = overlay.get("LLM_MODEL", model)
+        api_key = (
+            overlay.get("LLM_API_KEY")
+            or overlay.get("DEEPSEEK_API_KEY")
+            or overlay.get("NVIDIA_API_KEY")
+            or api_key
+        )
 
     entries = parse_diary_entries()
     selected = select_entries(entries, args.limit, args.seed, args.year, args.start_date, args.end_date)

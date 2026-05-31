@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Generate creative query-style augmentations for honest MIRA training.
 
-The script uses an OpenAI-compatible chat-completions endpoint, reading API
-configuration from ../jarvis-platform/.env by default. It never prints API keys
-or full private memory text.
+Uses an OpenAI-compatible chat-completions endpoint; credentials come from
+neural-mira/.env via nm_config. Never prints API keys or full memory text.
 """
 
 from __future__ import annotations
@@ -25,11 +24,9 @@ from typing import Any
 
 from honest_mira import EvalExample, example_source, generate_benchmark, stratified_limit_examples
 from htema_core import DiaryMemory, parse_all_memories
+from nm_config import LAB_ROOT, LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
 
 
-LAB_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = LAB_ROOT.parent
-JARVIS_ENV = REPO_ROOT / "jarvis-platform" / ".env"
 DEFAULT_OUTPUT = LAB_ROOT / "data" / "style_augmented_queries.jsonl"
 
 DEFAULT_STYLES = [
@@ -621,7 +618,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=6000, help="Max completion tokens per request.")
     parser.add_argument("--retries", type=int, default=2, help="Retries per failed API request.")
     parser.add_argument("--no-json-mode", action="store_true", help="Do not request OpenAI-compatible JSON mode.")
-    parser.add_argument("--env", type=Path, default=JARVIS_ENV, help="Path to Jarvis .env.")
+    parser.add_argument("--env", type=Path, default=None, help="(Optional) Path to an additional .env to overlay on top of neural-mira/.env.")
     parser.add_argument("--base-url", default=None, help="Override OpenAI-compatible base URL.")
     parser.add_argument("--model", default=None, help="Override model, e.g. deepseek-v4-flash.")
     parser.add_argument("--api-key-env", default="", help="Optional env var name containing the API key.")
@@ -632,21 +629,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    env = {**load_env_file(args.env), **os.environ}
+    # nm_config has already loaded neural-mira/.env at import time. Overlay
+    # an additional --env file (if any) plus process env so CLI overrides win.
+    env = {
+        "LLM_BASE_URL": LLM_BASE_URL,
+        "LLM_MODEL": LLM_MODEL,
+        "LLM_API_KEY": LLM_API_KEY or "",
+        **(load_env_file(args.env) if args.env else {}),
+        **{k: v for k, v in os.environ.items() if k.startswith(("LLM_", "DEEPSEEK_", "NVIDIA_", "MIRA_", "OPENAI_"))},
+    }
     explicit_key = env.get(args.api_key_env) if args.api_key_env else None
-    model = args.model or env.get("DEEPSEEK_MODEL") or env.get("MIRA_AUG_MODEL") or "deepseek-v4-flash"
+    model = args.model or env.get("DEEPSEEK_MODEL") or env.get("MIRA_AUG_MODEL") or env.get("LLM_MODEL") or "gpt-4o-mini"
     wants_deepseek = "deepseek" in model.lower()
     base_url = (
         args.base_url
         or env.get("DEEPSEEK_BASE_URL")
         or ("https://api.deepseek.com" if wants_deepseek else env.get("LLM_BASE_URL"))
-        or "https://api.deepseek.com"
+        or "https://api.openai.com/v1"
     )
     api_key = (
         explicit_key
         or (env.get("DEEPSEEK_API_KEY") if wants_deepseek else None)
         or env.get("LLM_API_KEY")
-        or env.get("DEEPSEEK_API_KEY")
+        or env.get("OPENAI_API_KEY")
         or env.get("NVIDIA_API_KEY")
     )
 
