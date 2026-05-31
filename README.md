@@ -2,7 +2,7 @@
 
 > Neural attention head for personal recall. Trains on diary entries to learn temporal, source-trust, and relevance-aware ranking.
 
-<!-- Drop a header image here once you've generated one — see README footer for prompts -->
++ ![Neural MIRA](docs/header.png)
 
 ## Why
 
