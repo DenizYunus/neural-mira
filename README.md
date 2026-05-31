@@ -17,14 +17,15 @@ Neural MIRA is a small attention head trained to fuse those signals — plus den
 
 ## Quick start
 
-Three commands to a working demo (Anne Frank's diary as sample data — see [Quick start guide](docs/quickstart.md) for details):
+Five commands to a working demo (Anne Frank's diary as sample data — see [Quick start guide](docs/quickstart.md) for the full walkthrough):
 
 ```bash
 git clone https://github.com/DenizYunus/neural-mira.git
 cd neural-mira
 pip install -r requirements-neural.txt
-python scripts/fetch_demo_data.py        # ⚙️ coming — downloads + converts Anne Frank's diary
-python scripts/search_mira.py "days when she felt hopeful" --limit 5
+cp .env.example .env                          # then add your LLM_API_KEY
+python scripts/fetch_demo_data.py             # downloads + LLM-tags Anne Frank's diary (~$0.30 in DeepSeek tokens)
+python scripts/search_htema.py "days when she felt hopeful" --limit 5
 ```
 
 To use your own diaries instead, drop `*.md` files into `data/diaries/` (see [`data/README.md`](data/README.md) for the expected format) and skip the `fetch_demo_data` step.

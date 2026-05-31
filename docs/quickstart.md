@@ -2,28 +2,58 @@
 
 Two paths: try the **Anne Frank demo** (no diaries of your own needed) or **bring your own**.
 
-## Path A — Anne Frank demo (3 minutes)
+## Path A — Anne Frank demo (~5 minutes + LLM time)
 
-> ⚠️ The Anne Frank fetcher script (`scripts/fetch_demo_data.py`) is on the immediate roadmap. Once it lands, this section becomes the canonical "first thing you do after cloning." For now, follow Path B with any small set of dated markdown entries.
-
-Anne Frank's diary is in the EU public domain since 2016 (70 years after her death in 1945). The fetcher will:
-
-1. Download a stable PD edition of the diary text.
-2. Parse each entry into the DailyBean markdown format Neural MIRA expects.
-3. Infer mood (1–5) from sentiment over each entry.
-4. Place the result at `data/diaries/anne_frank.md`.
-5. Build the dense embedding cache.
-6. Train a tiny reranker on a few hundred LLM-synthesized queries (or skip training and use scalar HTEMA out of the box).
-
-After that you can search:
+`scripts/fetch_demo_data.py` bootstraps the demo dataset from scratch.
 
 ```bash
-python scripts/search_mira.py "days when she felt hopeful" --limit 5
-python scripts/search_mira.py "what changed after they heard about the camps"
-python scripts/search_mira.py "her thoughts about Peter in early 1944"
+# 1. Install + configure
+pip install -r requirements-neural.txt
+cp .env.example .env
+# Open .env and set LLM_API_KEY (any OpenAI-compatible endpoint).
+# DeepSeek works great and costs ~$0.30 for the full diary.
+
+# 2. Fetch + tag the diary (LLM enriches each entry with mood + icons)
+python scripts/fetch_demo_data.py
+
+# Optional smoke test first — process only 5 entries to verify end-to-end:
+python scripts/fetch_demo_data.py --max 5
 ```
 
-The diary is short enough (~270 entries) that the full pipeline finishes in minutes on a laptop CPU.
+What it does:
+
+1. Downloads Anne Frank's *The Diary of a Young Girl* OCR plain text from Internet Archive (cached locally so re-runs don't re-download).
+2. Parses entries by their original date headers ("Sunday, 14 June, 1942") and reformats into `### YYYY-MM-DD` blocks.
+3. For each entry, calls the configured LLM to extract:
+   - **mood** (1–5) from sentiment — 1 = hopeless, 5 = full of hope
+   - **icons** — lowercase string tags for people (`kitty`, `peter`, `father`), places (`secret_annex`, `amsterdam`), themes (`fear`, `hope`, `growing_up`, `war_news`), and activities (`reading`, `writing`, `birthday`, `argument_with_mother`)
+4. Writes everything to `data/diaries/anne_frank.md` in the exact format `parse_diary_memories` expects.
+
+Resumable by default — Ctrl-C is safe, just re-run the same command. Output is flushed per entry, so you lose at most one entry to an interrupt.
+
+The fetcher uses an LLM by default but `--no-llm` ships dates + bodies only if you'd rather not spend API tokens.
+
+### After the fetch
+
+Search with scalar HTEMA (no training needed — works immediately):
+
+```bash
+python scripts/search_htema.py "days when she felt hopeful" --limit 5
+python scripts/search_htema.py "what changed after they heard about the camps"
+python scripts/search_htema.py "her thoughts about Peter in early 1944"
+```
+
+Or train your own Neural MIRA reranker on the demo data (see [`docs/training.md`](training.md)):
+
+```bash
+python scripts/generate_training_queries.py --limit 50 --output data/generated_queries.jsonl
+python scripts/honest_mira.py --split all --epochs 20 --max-examples 800
+python scripts/search_mira.py "days when she felt hopeful" --limit 5
+```
+
+### Sourcing note
+
+The diary is public domain in the EU since 2016 (70 years after Anne Frank's death in 1945) and in Australia since 1995. The default source URL is Internet Archive's OCR text. US users should verify their local copyright status — `--source-url` lets you point the fetcher at a different source if needed.
 
 ## Path B — Bring your own diary
 
