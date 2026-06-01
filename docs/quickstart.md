@@ -6,54 +6,96 @@ Two paths: try the **Anne Frank demo** (no diaries of your own needed) or **brin
 
 `scripts/fetch_demo_data.py` bootstraps the demo dataset from scratch.
 
+### Why Anne Frank's diary as the demo?
+
+It's a near-perfect test corpus for autobiographical-memory retrieval:
+
+- **Real diary, real person, real emotional arc.** No synthetic-data fingerprint.
+- **Short** — ~76 entries from June 1942 to August 1944. Full pipeline finishes in minutes.
+- **Emotionally textured** — fear, boredom, hope, romance, grief, gallows humor. Exercises the mood + emotion heads properly.
+- **Dense in named entities** — Kitty, Peter, Margot, Mrs. Van Daan, Mr. Dussel, Mummy, Daddy. Tests people-filter retrieval.
+- **Naturally dated** — every entry has an explicit date header, so temporal queries work cleanly.
+- **Public domain in the EU (since 2016) and Australia (since 1995).** The fetcher links to a third-party hosted copy; the bytes never enter this repo.
+
+### Run it
+
 ```bash
 # 1. Install + configure
 pip install -r requirements-neural.txt
 cp .env.example .env
-# Open .env and set LLM_API_KEY (any OpenAI-compatible endpoint).
-# DeepSeek works great and costs ~$0.30 for the full diary.
+# Open .env and set LLM_API_KEY. DeepSeek works great and costs $0.10-0.30
+# for the full ~76-entry tagging pass. OpenAI / Anthropic-compatible /
+# local vLLM endpoints all work — just set LLM_BASE_URL accordingly.
 
-# 2. Fetch + tag the diary (LLM enriches each entry with mood + icons)
-python scripts/fetch_demo_data.py
-
-# Optional smoke test first — process only 5 entries to verify end-to-end:
+# 2. Smoke test first (5 entries, ~30 seconds, ~$0.01)
 python scripts/fetch_demo_data.py --max 5
+
+# 3. If that looks right, run the full thing
+python scripts/fetch_demo_data.py
 ```
 
 What it does:
 
-1. Downloads Anne Frank's *The Diary of a Young Girl* OCR plain text from Internet Archive (cached locally so re-runs don't re-download).
-2. Parses entries by their original date headers ("Sunday, 14 June, 1942") and reformats into `### YYYY-MM-DD` blocks.
-3. For each entry, calls the configured LLM to extract:
-   - **mood** (1–5) from sentiment — 1 = hopeless, 5 = full of hope
-   - **icons** — lowercase string tags for people (`kitty`, `peter`, `father`), places (`secret_annex`, `amsterdam`), themes (`fear`, `hope`, `growing_up`, `war_news`), and activities (`reading`, `writing`, `birthday`, `argument_with_mother`)
-4. Writes everything to `data/diaries/anne_frank.md` in the exact format `parse_diary_memories` expects.
+1. **Downloads** a text-based PDF of *The Diary of a Young Girl* (cached locally — runs offline after first fetch).
+2. **Extracts** 76 clean entries by parsing the original date headers ("Saturday, 13 June 1942"). The PDF's table of contents is detected and skipped automatically.
+3. **Tags each entry via LLM** — one chat-completions call per entry, extracting:
+   - **mood** (1–5) where 1 = hopeless, 5 = full of hope
+   - **icons** — lowercase string tags mixing people (`kitty`, `peter`, `mother`, `father`, `mrs_van_daan`, `mr_dussel`), places (`secret_annex`, `school`, `amsterdam`), themes (`fear`, `hope`, `loneliness`, `growing_up`, `war_news`, `bombing`), and activities (`reading`, `writing`, `birthday`, `argument_with_mother`)
+4. **Writes** to `data/diaries/anne_frank.md` in the exact `### YYYY-MM-DD` + `**Mood**` + `**Icons**` format `parse_diary_memories` expects.
 
 Resumable by default — Ctrl-C is safe, just re-run the same command. Output is flushed per entry, so you lose at most one entry to an interrupt.
 
 The fetcher uses an LLM by default but `--no-llm` ships dates + bodies only if you'd rather not spend API tokens.
 
-### After the fetch
+### After the fetch — query examples
 
-Search with scalar HTEMA (no training needed — works immediately):
+Search with scalar HTEMA (no training needed, works immediately):
 
 ```bash
-python scripts/search_htema.py "days when she felt hopeful" --limit 5
-python scripts/search_htema.py "what changed after they heard about the camps"
+# Mood + temporal
+python scripts/search_htema.py "days she felt hopeful" --limit 5
+
+# Person filter + temporal
 python scripts/search_htema.py "her thoughts about Peter in early 1944"
+
+# Emotional + diary-feature head
+python scripts/search_htema.py "moments of fear during air raids"
+
+# Place + mood
+python scripts/search_htema.py "small joys inside the secret annex"
+
+# Relationship + emotion
+python scripts/search_htema.py "arguments with her mother"
 ```
 
-Or train your own Neural MIRA reranker on the demo data (see [`docs/training.md`](training.md)):
+Each query exercises a different combination of attention heads — the mood + temporal + emotion + diary-feature heads were designed to compose, and Anne Frank's diary has the structural richness to actually test them.
+
+### Train your own Neural MIRA reranker (optional)
+
+The demo works out-of-the-box with scalar HTEMA. To get the full Neural MIRA reranker, train on synthesized query examples (see [`docs/training.md`](training.md)):
 
 ```bash
-python scripts/generate_training_queries.py --limit 50 --output data/generated_queries.jsonl
+# Generate ~150 training examples from the demo diary
+python scripts/generate_training_queries.py --limit 50 --examples-per-entry 3 \
+    --output data/generated_queries.jsonl
+
+# Train
 python scripts/honest_mira.py --split all --epochs 20 --max-examples 800
-python scripts/search_mira.py "days when she felt hopeful" --limit 5
+
+# Search with the trained checkpoint
+python scripts/search_mira.py "days she felt hopeful" --limit 5
 ```
 
-### Sourcing note
+### Default source + fallback
 
-The diary is public domain in the EU since 2016 (70 years after Anne Frank's death in 1945) and in Australia since 1995. The default source URL is Internet Archive's OCR text. US users should verify their local copyright status — `--source-url` lets you point the fetcher at a different source if needed.
+The default source URL is a text-based PDF of the English Definitive Edition. If that URL ever stops working, the Internet Archive has a more stable (but noisier) OCR text fallback:
+
+```bash
+python scripts/fetch_demo_data.py --source-url \
+    https://archive.org/download/in.ernet.dli.2015.201940/2015.201940.Anne-Frank_djvu.txt
+```
+
+Anyone in a jurisdiction where they prefer a different source — point `--source-url` at it. The script auto-detects format (`.pdf` → PDF extraction, anything else → plain text).
 
 ## Path B — Bring your own diary
 

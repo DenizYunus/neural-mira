@@ -2,30 +2,48 @@
 """Bootstrap the Anne Frank demo dataset for Neural MIRA.
 
 Pipeline:
-    1. Download Anne Frank's diary plain text from Internet Archive (cached).
-    2. Parse entries by their original date headers ("Sunday, 14 June, 1942").
-    3. For each entry, call the configured LLM (.env: LLM_*) to infer:
+    1. Download Anne Frank's diary (PDF or plain text) and cache locally.
+    2. Extract text — PDF via pypdf, plain text passed through.
+    3. Parse entries by their original date headers ("Saturday, 13 June 1942").
+    4. For each entry, call the configured LLM (.env: LLM_*) to infer:
          - mood (1-5)
          - icons (lowercase string tags for themes, people, places, activities)
-    4. Write to data/diaries/anne_frank.md in the format scripts/htema_core.py
+    5. Write to data/diaries/anne_frank.md in the format scripts/htema_core.py
        parses (### YYYY-MM-DD headers + **Mood**/**Icons** metadata lines).
 
 Usage:
-    python scripts/fetch_demo_data.py                  # full diary (~270 entries)
-    python scripts/fetch_demo_data.py --max 20         # quick sanity test
+    python scripts/fetch_demo_data.py                  # full demo (~78 entries from default PDF)
+    python scripts/fetch_demo_data.py --max 10         # quick sanity test
     python scripts/fetch_demo_data.py --no-llm         # date + body only, no mood/tags
     python scripts/fetch_demo_data.py --no-resume      # overwrite instead of resuming
+
+    # Use a different source — any URL ending in .pdf gets PDF extraction;
+    # anything else is treated as plain text.
+    python scripts/fetch_demo_data.py --source-url <other-url>
 
 The script is resumable by default: if data/diaries/anne_frank.md already
 contains N entries, only the remaining (entries.length - N) entries are
 processed. Output is flushed per entry, so Ctrl-C is safe.
 
-Source attribution:
-    Anne Frank, 'The Diary of a Young Girl' — Internet Archive OCR text.
-    Public domain in the EU since 2016 (70 years after Anne Frank's death
-    in 1945) and in Australia since 1995. US users should verify their
-    local copyright status; the script accepts any plain-text URL via
-    --source-url, so you can point it at a different source you have rights to.
+Default source:
+    The Diary of a Young Girl (English Definitive Edition extract), hosted
+    by Garodia school library as a clean text-PDF. ~78 entries, June 1942
+    to August 1944. Extracts cleanly with no OCR noise.
+
+Fallback source:
+    If the default URL disappears, Internet Archive's OCR plain text is the
+    stable institutional alternative:
+        --source-url https://archive.org/download/in.ernet.dli.2015.201940/2015.201940.Anne-Frank_djvu.txt
+    Fewer clean entries (~17-58 depending on regex strictness) and visible
+    OCR noise in body text, but the Internet Archive is bedrock-stable.
+
+Copyright posture:
+    The diary is public domain in the EU since 2016 (70 years after Anne
+    Frank's death in 1945) and in Australia since 1995. US copyright on
+    the Otto Frank Definitive Edition runs to ~2050. This script never
+    redistributes the diary text — it fetches from a third-party URL the
+    user explicitly points at via --source-url. US users should verify
+    their local copyright status before running.
 """
 
 from __future__ import annotations
@@ -52,10 +70,12 @@ from nm_config import (
 
 
 DEFAULT_SOURCE_URL = (
-    "https://archive.org/stream/in.ernet.dli.2015.201940/"
-    "2015.201940.Anne-Frank_djvu.txt"
+    "https://pggarodialibrary.wordpress.com/wp-content/uploads/2014/07/"
+    "the-diary-of-a-young-girl.pdf"
 )
-CACHE_PATH = LAB_ROOT / "data" / ".cache" / "anne_frank_raw.txt"
+# Cache extension matches what the source serves. Resolved at runtime from
+# the source URL — .pdf URLs cache as .pdf, anything else as .txt.
+CACHE_DIR = LAB_ROOT / "data" / ".cache"
 OUTPUT_PATH = DIARY_ROOT / "anne_frank.md"
 
 MONTH_NAMES = {
@@ -78,16 +98,57 @@ ENTRY_HEADER_RE = re.compile(
 )
 
 
-# --- Step 1: download (with on-disk cache) -----------------------------
-def download_diary(url: str, cache: Path) -> str:
-    """Fetch once, reuse forever. Cache lives outside data/diaries so the
-    parser doesn't see it as a diary file."""
-    if cache.exists():
-        print(f"Using cached diary text at {cache}", file=sys.stderr)
-        return cache.read_text(encoding="utf-8", errors="replace")
+# --- Step 1: download + extract text (with on-disk cache) --------------
+def _looks_like_pdf(url: str) -> bool:
+    """URL-extension heuristic. Could also sniff %PDF magic bytes but the
+    URL signal is reliable enough for our two known sources."""
+    return url.lower().rstrip("/").endswith(".pdf")
 
-    print(f"Downloading diary text from {url}", file=sys.stderr)
-    cache.parent.mkdir(parents=True, exist_ok=True)
+
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Concatenate all page texts. Imported lazily so people without pypdf
+    can still use plain-text sources without installing it."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as error:
+        raise RuntimeError(
+            "pypdf is required to extract text from a PDF source. Install:\n"
+            "    pip install pypdf\n"
+            "Or pass --source-url pointing at a plain-text URL instead."
+        ) from error
+
+    import io
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages: list[str] = []
+    for page in reader.pages:
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception:
+            # Don't let one malformed page kill the whole extraction.
+            pages.append("")
+    return "\n\n".join(pages)
+
+
+def download_diary(url: str, cache_dir: Path) -> str:
+    """Fetch once, reuse forever. Cache lives outside data/diaries so the
+    parser doesn't pick it up as a diary file.
+
+    Returns extracted plain text regardless of source format. PDF sources
+    are decoded via pypdf; plain-text sources pass through unchanged.
+    """
+    is_pdf = _looks_like_pdf(url)
+    cache_path = cache_dir / (
+        "anne_frank_raw.pdf" if is_pdf else "anne_frank_raw.txt"
+    )
+
+    if cache_path.exists():
+        print(f"Using cached source at {cache_path}", file=sys.stderr)
+        if is_pdf:
+            return _extract_pdf_text(cache_path.read_bytes())
+        return cache_path.read_text(encoding="utf-8", errors="replace")
+
+    print(f"Downloading diary source from {url}", file=sys.stderr)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(
         url, headers={"User-Agent": "neural-mira/1.0 fetch_demo_data"}
     )
@@ -97,33 +158,64 @@ def download_diary(url: str, cache: Path) -> str:
     except urllib.error.URLError as error:
         raise RuntimeError(
             f"Failed to download diary from {url}: {error}\n"
-            f"Try --source-url <different_url> if the source has moved."
+            f"The default WordPress PDF can disappear without notice. Fallback:\n"
+            f"    python scripts/fetch_demo_data.py --source-url \\\n"
+            f"        https://archive.org/download/in.ernet.dli.2015.201940/"
+            f"2015.201940.Anne-Frank_djvu.txt"
         ) from error
 
-    text = raw_bytes.decode("utf-8", errors="replace")
-    cache.write_text(text, encoding="utf-8")
-    print(f"Cached {len(text):,} bytes to {cache}", file=sys.stderr)
-    return text
+    # Persist raw bytes so re-runs skip the network entirely.
+    cache_path.write_bytes(raw_bytes)
+    print(f"Cached {len(raw_bytes):,} bytes to {cache_path}", file=sys.stderr)
+
+    if is_pdf:
+        return _extract_pdf_text(raw_bytes)
+    return raw_bytes.decode("utf-8", errors="replace")
 
 
 # --- Step 2: parse into (date, body) pairs -----------------------------
-def parse_entries(raw: str) -> list[tuple[str, str]]:
-    """Split the raw OCR text into (ISO date, body) pairs.
+# A "table of contents" entry in the WordPress PDF looks like:
+#   "Saturday, 13 June 1942 ............................................. 7"
+# These match the same date-header regex as real entries, so we have to
+# detect and drop them. Two signals work together:
+#   (a) the body is almost entirely dot-leader characters
+#   (b) the body is much shorter than a real entry
+# Both are captured by the "drop if body is mostly dots OR very short" pass.
+_DOT_LEADER_RE = re.compile(r"^[.\s\d]+$", re.MULTILINE)
 
-    Stops looking for headers once we hit the matching position list —
+
+def _is_table_of_contents_entry(body: str) -> bool:
+    """True if the body looks like a TOC line: mostly dots, a page number,
+    maybe a stray date header from the next TOC row."""
+    if len(body) < 60:
+        return True
+    # If >70% of body chars are dots/whitespace/digits, it's a TOC row, not prose.
+    dotty = sum(1 for c in body if c in "._ \t\n0123456789")
+    return dotty / max(1, len(body)) > 0.70
+
+
+def parse_entries(raw: str) -> list[tuple[str, str]]:
+    """Split the raw text into (ISO date, body) pairs.
+
     body[i] runs from the end of header[i] to the start of header[i+1].
-    Entries shorter than ~30 chars are dropped (usually OCR noise that
-    matched the header regex by accident).
+    Two cleanup passes happen here:
+
+    1. Drop TOC-like rows (lots of dot leaders, short, mostly punctuation).
+       Otherwise the PDF's contents page would emit ~78 phantom entries.
+
+    2. Dedupe by date, keeping the longest body. When the same date appears
+       in both the TOC and the body, the body version always wins because
+       it's prose; the TOC version is dots.
     """
     matches = list(ENTRY_HEADER_RE.finditer(raw))
-    entries: list[tuple[str, str]] = []
+    by_date: dict[str, str] = {}
+
     for i, match in enumerate(matches):
         day = int(match.group(1))
         month = MONTH_NAMES[match.group(2).lower()]
         year = int(match.group(3))
-        # Sanity check: Anne Frank's diary spans 1942-1944. Anything outside
-        # that range is almost certainly an OCR misread of another date
-        # mentioned in the body text.
+        # Anne Frank's diary spans 1942-1944. Anything outside that range is
+        # almost certainly a date mentioned inside narrative text, not a header.
         if year < 1942 or year > 1944:
             continue
         date_iso = f"{year:04d}-{month:02d}-{day:02d}"
@@ -132,18 +224,28 @@ def parse_entries(raw: str) -> list[tuple[str, str]]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
         body = raw[start:end].strip()
 
-        # Strip the "Dear Kitty," opener that prefaces almost every entry —
-        # it's noise for retrieval and just adds 12 tokens per entry.
+        # Strip the "Dear Kitty," opener that prefaces almost every entry.
         body = re.sub(
             r"^\s*Dear\s+Kitty\s*,?\s*\n?", "", body, count=1, flags=re.IGNORECASE
         )
-        # Collapse multiple blank lines so the markdown output stays readable.
+        # Collapse multiple blank lines for cleaner markdown output.
         body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-        if len(body) < 30:
+        # Drop TOC rows.
+        if _is_table_of_contents_entry(body):
             continue
-        entries.append((date_iso, body))
-    return entries
+        # Drop OCR noise (entries with no real content past the date).
+        if len(body) < 60:
+            continue
+
+        # Dedupe — if a date appears more than once (TOC + body, or split OCR),
+        # keep the longest body. Real entries are always much longer than noise.
+        existing = by_date.get(date_iso)
+        if existing is None or len(body) > len(existing):
+            by_date[date_iso] = body
+
+    # Return in date order so the output markdown reads chronologically.
+    return sorted(by_date.items(), key=lambda pair: pair[0])
 
 
 # --- Step 3: LLM enrichment (one call per entry) -----------------------
@@ -349,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         require_llm_api_key()
 
     # Pipeline ---------------------------------------------------------
-    raw = download_diary(args.source_url, CACHE_PATH)
+    raw = download_diary(args.source_url, CACHE_DIR)
     entries = parse_entries(raw)
     print(f"Parsed {len(entries)} entries from raw text.", file=sys.stderr)
     if not entries:

@@ -3,3 +3,6 @@ sentence-transformers>=2.7
 numpy>=1.26,<3
 tqdm>=4.66
 scikit-learn>=1.4
+# PDF text extraction — used by scripts/fetch_demo_data.py to parse the
+# Anne Frank demo PDF. Pure-Python, ~30KB, no native deps.
+pypdf>=4.0
