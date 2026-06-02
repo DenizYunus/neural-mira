@@ -1,5 +1,8 @@
 # Neural MIRA
 
+[![CI](https://github.com/DenizYunus/neural-mira/actions/workflows/ci.yml/badge.svg)](https://github.com/DenizYunus/neural-mira/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > Neural attention head for personal recall. Trains on diary entries to learn temporal, source-trust, and relevance-aware ranking.
 
 + ![Neural MIRA](docs/header.png)

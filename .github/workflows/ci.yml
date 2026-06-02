@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: Smoke test (stdlib-only, no network)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The scalar core (htema_core, fetch_demo_data.parse_entries) is pure
+      # standard library — no pip install needed. This keeps CI fast and
+      # immune to dependency / network flakiness. The heavy deps (torch,
+      # sentence-transformers) are only needed for neural training, which
+      # isn't exercised here.
+      - name: Run hermetic smoke test
+        run: python scripts/smoke_test.py
