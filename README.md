@@ -100,6 +100,30 @@ Real, unedited results from `search_htema.py` against the 76-entry Anne Frank de
 
 These are scalar-HTEMA results out of the box. Training the neural reranker ([`docs/training.md`](docs/training.md)) sharpens ranking further — see the [benchmark numbers](docs/evaluation.md).
 
+## Does training actually help? (reproducible on the demo corpus)
+
+You don't have to take the benchmark on faith. Train the lightweight HTEMA ranker on the 76-entry Anne Frank corpus and measure against a held-out test split:
+
+```bash
+# Generate weak-supervision query examples from the diary (needs LLM_API_KEY)
+python scripts/generate_training_queries.py --limit 40 --examples-per-entry 3 \
+    --batch-size 4 --output data/generated_queries.jsonl
+
+# Train with an 80/20 split and print baseline-vs-trained metrics
+python scripts/train_htema.py --training data/generated_queries.jsonl \
+    --model data/htema_model.json --epochs 150 --negatives 24 --test-ratio 0.2
+```
+
+Result from one such run (120 generated examples, 24 held-out test queries, **query-text-only — no oracle-window leakage**):
+
+| Metric | Baseline (default weights) | Trained | Δ |
+|--------|:--------------------------:|:-------:|:---:|
+| Recall@1 | 0.458 | **0.500** | +9% |
+| Recall@5 | 0.708 | **0.792** | +12% |
+| MRR | 0.583 | **0.614** | +5% |
+
+Modest gains — it's a 76-entry corpus and a linear ranker — but **real, and measured on queries the model never trained on**. Exact numbers vary run to run because the training queries are LLM-generated. On a full personal corpus with the neural reranker + dense embeddings, the gap is far larger ([`docs/evaluation.md`](docs/evaluation.md)).
+
 ## What you get in 30 seconds
 
 1. Parses dated markdown diary entries into **memory tokens**
