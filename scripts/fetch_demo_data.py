@@ -303,7 +303,10 @@ def call_llm(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
-        "max_tokens": 400,
+        # Generous budget: reasoning models (e.g. deepseek-v4-flash) spend
+        # tokens on hidden reasoning_content BEFORE emitting the JSON. Too low
+        # a cap truncates the JSON mid-string. 1500 leaves ample room.
+        "max_tokens": 1500,
         "stream": False,
     }
     req = urllib.request.Request(
@@ -318,12 +321,33 @@ def call_llm(
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
 
-    content = payload["choices"][0]["message"]["content"].strip()
-    # Some models wrap JSON in ```json ... ``` fences despite the system prompt.
+    content = (payload["choices"][0]["message"].get("content") or "").strip()
+    return _extract_json_object(content)
+
+
+def _extract_json_object(content: str) -> dict[str, Any]:
+    """Pull a JSON object out of an LLM response defensively.
+
+    Handles: clean JSON, ```json fenced blocks, and JSON with stray prose
+    before/after it. Strategy: strip code fences, then if direct parse fails,
+    extract the substring from the first '{' to the last '}'.
+    """
+    if not content:
+        raise ValueError("empty LLM response content")
+    # Strip ```json ... ``` fences if present.
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*\n?", "", content)
         content = re.sub(r"\n?\s*```\s*$", "", content)
-    return json.loads(content)
+        content = content.strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Fall back to brace extraction — grab the outermost {...}.
+        start = content.find("{")
+        end = content.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(content[start : end + 1])
 
 
 def enrich_entry(

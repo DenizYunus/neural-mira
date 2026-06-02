@@ -54,6 +54,52 @@ The first hits the **temporal** head (early 1944), the second the **emotional** 
 
 Full walkthrough with sanity-check tips and bring-your-own-diary instructions: [`docs/quickstart.md`](docs/quickstart.md).
 
+## See it actually work
+
+Real, unedited results from `search_htema.py` against the 76-entry Anne Frank demo corpus — **no training**, just the default scalar HTEMA weights. (`Mood` is the LLM-inferred 1–5 score stored per entry; minor OCR artifacts from the source PDF left as-is.)
+
+**`"news about the war and the invasion"`**
+
+| # | Date | Mood | Excerpt |
+|---|------|:----:|---------|
+| 1 | 1944-06-09 | 5 | "Great news of the invasion! The Allies have taken Bayeux, a village on the coast of France…" |
+| 2 | 1944-06-06 | 5 | "'This is D-Day,' the BBC said on the radio at twelve o'clock. 'This is the day. The invasion…'" |
+| 3 | 1944-03-29 | 3 | "Mr Bolkestein, from the Government, was speaking on the Dutch broadcast from London…" |
+
+→ Surfaced **both D-Day entries** (6 & 9 June 1944) at the top via semantic + thematic match.
+
+**`"moments of fear during air raids"`**
+
+| # | Date | Mood | Excerpt |
+|---|------|:----:|---------|
+| 1 | 1943-01-13 | 1 | "Terrible things are happening outside. People are being pulled out of their homes and arrested…" |
+| 2 | 1943-08-03 | 2 | "We just had a third air raid. I am trying to be brave. Mrs van Daan…" |
+| 3 | 1944-03-29 | 3 | "Mr Bolkestein… on the Dutch broadcast from London…" |
+
+→ The **emotion head** pulled the two lowest-mood (1 and 2) air-raid entries to the top.
+
+**`"her thoughts about Peter in early 1944"`**
+
+| # | Date | Mood | Excerpt |
+|---|------|:----:|---------|
+| 1 | 1944-01-06 | 3 | "I realized what's wrong with Mother. She says that she sees us as her friends, not her…" |
+| 2 | 1944-02-18 | 4 | "Whenever I go upstairs, it's always so that I can see him. I have something to look forward…" |
+| 3 | 1944-03-19 | 5 | "Yesterday was a very important day for me. At five o'clock I put on the potatoes to cook…" |
+
+→ The **temporal head** confined results to Jan–Mar 1944; the **person head** kept them on Peter/relationships.
+
+**`"arguments with her mother"`**
+
+| # | Date | Mood | Excerpt |
+|---|------|:----:|---------|
+| 1 | 1943-04-02 | 2 | "I'm in trouble again! Last night, I was lying in bed and waiting for Father to come…" |
+| 2 | 1942-07-08 | 2 | "It seems like years since Sunday morning. So much has happened — the whole world has turned upside…" |
+| 3 | 1944-01-06 | 3 | "I realized what's wrong with Mother. She says that she sees us as her friends, not her…" |
+
+→ Mother-conflict entries surfaced via **person + emotion**, all low/mid mood.
+
+These are scalar-HTEMA results out of the box. Training the neural reranker ([`docs/training.md`](docs/training.md)) sharpens ranking further — see the [benchmark numbers](docs/evaluation.md).
+
 ## What you get in 30 seconds
 
 1. Parses dated markdown diary entries into **memory tokens**
