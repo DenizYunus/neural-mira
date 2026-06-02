@@ -155,7 +155,11 @@ Full numbers + baseline comparisons in [`docs/evaluation.md`](docs/evaluation.md
 
 ## Origin
 
-Originated as the research arm of a larger personal-memory system. References to `jarvis-platform` and `mira-platform` elsewhere in the docs point at that original parent project (not included here). The code in this repo is generic — point it at any directory of dated Markdown entries.
+Neural MIRA is the open core of a larger local-first personal-AI memory system — an orchestrator plus specialized retrieval substrates for diary/chat text, photos, video, and faces, all running on one machine. References to `jarvis-platform` and `mira-platform` elsewhere in the docs point at that (private) parent project.
+
+📖 **[Read the architecture writeup →](docs/the-bigger-picture.md)** — how the whole system fits together, and the engineering decisions (dual-vector image search, source-trust ranking, honest evaluation, orphan-sweep ingest) that mattered most.
+
+The code in this repo is generic — point it at any directory of dated Markdown entries.
 
 ## License
 
