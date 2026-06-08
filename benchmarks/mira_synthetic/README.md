@@ -23,10 +23,20 @@ photo metadata, corrections, ground-truth event rows, and reconstruction target
 dates. The reconstruction command consumes diary labels, chats, and photo
 metadata as separate source types.
 
+The generated target rows include:
+
+- `public_hint` for date-plus-public-metadata queries
+- `sparse_user_hint` for sparse user-hint queries
+- `confuser_event_ids` for adversarial intrusion scoring
+
+The benchmark's paper-facing score uses `ground_truth/events.jsonl`, not hidden
+diary wording. Hidden diary term overlap is still emitted as a diagnostic.
+
 Design rules:
 
 - Ground truth is deterministic and script-owned.
 - Diary entries are first-person labels used as hidden targets.
 - Chat and photo records are indirect evidence.
 - Contradictions and corrections are intentional, not data noise.
+- Confuser events are intentional adversarial distractors.
 - No private user data or API calls are required.

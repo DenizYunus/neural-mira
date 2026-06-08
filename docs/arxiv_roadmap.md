@@ -103,7 +103,10 @@ benchmark should not depend on private or legally ambiguous data.
 
 Status: started. `benchmarks/mira_synthetic/generate.py` creates a deterministic
 public multi-source corpus with diary labels, WhatsApp-style chats, photo
-metadata, corrections, ground truth events, and hidden reconstruction targets.
+metadata, corrections, ground truth events, adversarial confusers, and hidden
+reconstruction targets. `scripts/reconstruction_benchmark.py` can now evaluate
+date-only, public-metadata, sparse-hint, and legacy hidden-label query modes
+against event-level gold facts.
 
 ### 4. Human-Validated Queries
 

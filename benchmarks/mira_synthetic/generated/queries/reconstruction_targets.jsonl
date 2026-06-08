@@ -1,8 +1,8 @@
-{"event_id": "event:2026-01-02", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-02"}
-{"event_id": "event:2026-01-03", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-03"}
-{"event_id": "event:2026-01-04", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-04"}
-{"event_id": "event:2026-01-06", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-06"}
-{"event_id": "event:2026-01-08", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-08"}
-{"event_id": "event:2026-01-09", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-09"}
-{"event_id": "event:2026-01-11", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-11"}
-{"event_id": "event:2026-01-12", "reason": "hidden diary day with indirect chat/photo evidence", "target_date": "2026-01-12"}
+{"confuser_event_ids": ["event:2026-01-15"], "event_id": "event:2026-01-02", "public_hint": "Public metadata: people=Maya, Leo; location=metro station.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: music, guilt.", "target_date": "2026-01-02"}
+{"confuser_event_ids": [], "event_id": "event:2026-01-03", "public_hint": "Public metadata: people=Maya, Sara; location=Karga Cafe.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: writing, coffee.", "target_date": "2026-01-03"}
+{"confuser_event_ids": ["event:2026-01-14"], "event_id": "event:2026-01-04", "public_hint": "Public metadata: people=Maya, Nora; location=home.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: argument, travel.", "target_date": "2026-01-04"}
+{"confuser_event_ids": ["event:2026-01-15"], "event_id": "event:2026-01-06", "public_hint": "Public metadata: people=Maya, Leo; location=small studio.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: music, recovery.", "target_date": "2026-01-06"}
+{"confuser_event_ids": ["event:2026-01-14"], "event_id": "event:2026-01-08", "public_hint": "Public metadata: people=Maya, Sara, Nora; location=home.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: travel, courage.", "target_date": "2026-01-08"}
+{"confuser_event_ids": ["event:2026-01-14"], "event_id": "event:2026-01-09", "public_hint": "Public metadata: people=Maya, Mother; location=phone call.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: stress, family.", "target_date": "2026-01-09"}
+{"confuser_event_ids": ["event:2026-01-13"], "event_id": "event:2026-01-11", "public_hint": "Public metadata: people=Maya, Leo; location=bus.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: loss, panic.", "target_date": "2026-01-11"}
+{"confuser_event_ids": [], "event_id": "event:2026-01-12", "public_hint": "Public metadata: people=Maya, Nora; location=home.", "reason": "hidden diary day with indirect chat/photo evidence", "sparse_user_hint": "User hint: boundary, relationship.", "target_date": "2026-01-12"}

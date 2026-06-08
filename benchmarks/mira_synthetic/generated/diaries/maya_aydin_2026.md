@@ -69,3 +69,21 @@ I panicked because I thought the black notebook was gone. For two hours I imagin
 **Icons**: boundary, relationship, relief
 
 I sent the boundary message. It was short, kind, and final. Nora read it first and said I did not over-explain. The relief came late.
+
+### 2026-01-13
+**Mood**: 3
+**Icons**: notebook, archive, coffee
+
+I sorted old notebook pages at Karga Cafe with Sara. The black notebook stayed on the table the whole time. It was admin, not panic.
+
+### 2026-01-14
+**Mood**: 3
+**Icons**: berlin, budget, admin
+
+Sara and I cleaned up the Berlin budget spreadsheet. This was not the decision day anymore, just making the accepted workshop feel practical.
+
+### 2026-01-15
+**Mood**: 4
+**Icons**: music, practice, studio
+
+Leo and I had a normal dry vocal practice. No rain, no missed rehearsal, no dramatic redemption arc. Just repetition until the second harmony settled.

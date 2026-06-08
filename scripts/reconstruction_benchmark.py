@@ -64,8 +64,45 @@ GENERIC_RECONSTRUCTION_TERMS = {
 
 
 @dataclass(frozen=True)
+class TargetSpec:
+    target_date: str
+    event_id: str | None = None
+    public_hint: str = ""
+    sparse_user_hint: str = ""
+    query: str = ""
+    confuser_event_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EventTruth:
+    event_id: str
+    date: str
+    title: str
+    truth: str
+    people: tuple[str, ...] = ()
+    location: str = ""
+    contradiction: str = ""
+    correction: str = ""
+    confuser_for: tuple[str, ...] = ()
+
+    def fact_text(self) -> str:
+        parts = [
+            self.title,
+            self.truth,
+            f"People: {', '.join(self.people)}." if self.people else "",
+            f"Location: {self.location}." if self.location else "",
+            self.contradiction,
+            self.correction,
+        ]
+        return " ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
 class RankingResult:
     target: DiaryMemory
+    target_spec: TargetSpec
+    event_truth: EventTruth | None
+    query_mode: str
     query: str
     model: str
     rows: list[dict[str, Any]]
@@ -77,15 +114,17 @@ class BaselineSpec:
     name: str
     kind: str
     source_types: tuple[str, ...] = ()
-    use_trust_weighting: bool = False
+    trust_strategy: str = "none"
+    confidence_mode: str = "raw"
 
 
 BASELINES = (
-    BaselineSpec("mira_trust", "mira", use_trust_weighting=True),
-    BaselineSpec("mira_no_trust", "mira", use_trust_weighting=False),
+    BaselineSpec("mira_trust", "mira", trust_strategy="rank"),
+    BaselineSpec("mira_trust_v2", "mira", trust_strategy="confidence", confidence_mode="date_calibrated"),
+    BaselineSpec("mira_no_trust", "mira"),
     BaselineSpec("simple_rag_all", "simple_rag"),
-    BaselineSpec("diary_only", "mira", source_types=("diary",), use_trust_weighting=False),
-    BaselineSpec("chat_only", "mira", source_types=("whatsapp", "whatsapp_synthetic"), use_trust_weighting=False),
+    BaselineSpec("diary_only", "mira", source_types=("diary",)),
+    BaselineSpec("chat_only", "mira", source_types=("whatsapp", "whatsapp_synthetic")),
     BaselineSpec("chronological_neighbors", "chronological"),
 )
 
@@ -98,7 +137,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diary-root", type=Path, help="Directory or file containing dated markdown diary labels.")
     parser.add_argument("--whatsapp-root", type=Path, help="Directory containing WhatsApp-style chat export folders.")
     parser.add_argument("--photo-metadata", type=Path, help="JSONL file containing dated photo metadata evidence.")
+    parser.add_argument("--ground-truth-events", type=Path, help="JSONL file containing event-level gold facts.")
     parser.add_argument("--target-dates-file", type=Path, help="JSONL/TXT file listing target dates to hide/evaluate.")
+    parser.add_argument(
+        "--query-mode",
+        choices=("date_only", "date_plus_public_metadata", "sparse_user_hint", "legacy_hidden_label"),
+        default="date_only",
+        help="How much non-diary information the reconstruction query may include.",
+    )
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--no-rollups", action="store_true", help="Exclude week/month rollup memories.")
@@ -118,12 +164,12 @@ def diary_files_from_root(path: Path | None) -> list[Path] | None:
     return sorted(file_path for file_path in path.glob("*.md") if file_path.is_file())
 
 
-def load_target_dates(path: Path | None) -> set[str]:
+def load_target_specs(path: Path | None) -> dict[str, TargetSpec]:
     if path is None:
-        return set()
+        return {}
     if not path.exists():
         raise SystemExit(f"target dates file not found: {path}")
-    dates: set[str] = set()
+    specs: dict[str, TargetSpec] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -131,16 +177,68 @@ def load_target_dates(path: Path | None) -> set[str]:
         if line.startswith("{"):
             row = json.loads(line)
             value = row.get("target_date") or row.get("date")
+            if not isinstance(value, str) or not value:
+                continue
+            target_date = value[:10]
+            confusers = row.get("confuser_event_ids") or ()
+            specs[target_date] = TargetSpec(
+                target_date=target_date,
+                event_id=str(row.get("event_id") or row.get("gold_event_id") or "") or None,
+                public_hint=str(row.get("public_hint") or ""),
+                sparse_user_hint=str(row.get("sparse_user_hint") or ""),
+                query=str(row.get("query") or ""),
+                confuser_event_ids=tuple(str(item) for item in confusers),
+            )
         else:
-            value = line
-        if isinstance(value, str) and value:
-            dates.add(value[:10])
-    return dates
+            specs[line[:10]] = TargetSpec(target_date=line[:10])
+    return specs
+
+
+def load_event_truths(path: Path | None) -> tuple[dict[str, EventTruth], dict[str, EventTruth]]:
+    if path is None:
+        return {}, {}
+    if not path.exists():
+        raise SystemExit(f"ground truth events file not found: {path}")
+    by_id: dict[str, EventTruth] = {}
+    by_date: dict[str, EventTruth] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        event_id = str(row.get("event_id") or "")
+        event_date = normalize_json_date(row.get("date"))
+        if not event_id or not event_date:
+            continue
+        truth = EventTruth(
+            event_id=event_id,
+            date=event_date,
+            title=str(row.get("title") or ""),
+            truth=str(row.get("truth") or ""),
+            people=tuple(str(item) for item in row.get("people") or []),
+            location=str(row.get("location") or ""),
+            contradiction=str(row.get("contradiction") or ""),
+            correction=str(row.get("correction") or ""),
+            confuser_for=tuple(str(item)[:10] for item in row.get("confuser_for") or [] if str(item)),
+        )
+        by_id[event_id] = truth
+        by_date[event_date] = truth
+    return by_id, by_date
+
+
+def normalize_json_date(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    return value[:10]
 
 
 def salient_terms(memory: DiaryMemory, *, limit: int = 36) -> tuple[str, ...]:
+    return salient_terms_from_text(memory.text, limit=limit)
+
+
+def salient_terms_from_text(text: str, *, limit: int = 36) -> tuple[str, ...]:
     terms = []
-    for token in tokenize(memory.text):
+    for token in tokenize(text):
         if token in STOPWORDS or token in GENERIC_RECONSTRUCTION_TERMS:
             continue
         if len(token) < 4 or token.isdigit():
@@ -151,7 +249,17 @@ def salient_terms(memory: DiaryMemory, *, limit: int = 36) -> tuple[str, ...]:
     return tuple(term for term, _ in ranked[:limit])
 
 
-def query_for_target(memory: DiaryMemory) -> str:
+def query_for_target(memory: DiaryMemory, target_spec: TargetSpec, query_mode: str) -> str:
+    date_query = target_spec.query or f"Reconstruct what happened around {memory.date}."
+    if query_mode == "date_only":
+        return f"Reconstruct what happened around {memory.date}."
+    if query_mode == "date_plus_public_metadata":
+        hint = target_spec.public_hint.strip()
+        return f"{date_query} {hint}".strip()
+    if query_mode == "sparse_user_hint":
+        hint = target_spec.sparse_user_hint.strip() or target_spec.public_hint.strip()
+        return f"{date_query} {hint}".strip()
+
     hints = [icon.replace("_", " ") for icon in memory.icons[:5]]
     mood_hint = f"mood {memory.mood}" if memory.mood else ""
     hint_text = " ".join(item for item in [mood_hint, *hints] if item)
@@ -187,6 +295,7 @@ def row_for_memory(memory: DiaryMemory, *, score: float, ranking_score: float, f
         "memory": memory,
         "score": score,
         "ranking_score": ranking_score,
+        "confidence_score": ranking_score,
         "features": features or {},
     }
 
@@ -194,18 +303,21 @@ def row_for_memory(memory: DiaryMemory, *, score: float, ranking_score: float, f
 def rank_mira_evidence(
     *,
     target: DiaryMemory,
+    target_spec: TargetSpec,
+    query_mode: str,
     memories: list[DiaryMemory],
     top_k: int,
-    use_trust_weighting: bool,
+    trust_strategy: str,
 ) -> tuple[str, list[dict[str, Any]]]:
-    query_text = query_for_target(target)
+    query_text = query_for_target(target, target_spec, query_mode)
     query = build_query_spec(query_text, override_window=(target.date, target.date))
     ranked = score_memories(query, memories, DEFAULT_WEIGHTS)
     for row in ranked:
         memory = row["memory"]
         base_score = float(row["score"])
-        trust = source_weight(memory.source_type) if use_trust_weighting else 1.0
-        row["ranking_score"] = base_score * trust
+        trust = source_weight(memory.source_type)
+        row["ranking_score"] = base_score * trust if trust_strategy == "rank" else base_score
+        row["confidence_score"] = base_score * trust if trust_strategy in {"rank", "confidence"} else base_score
     ranked.sort(key=lambda item: item["ranking_score"], reverse=True)
     return query_text, ranked[:top_k]
 
@@ -213,10 +325,12 @@ def rank_mira_evidence(
 def rank_simple_rag_evidence(
     *,
     target: DiaryMemory,
+    target_spec: TargetSpec,
+    query_mode: str,
     memories: list[DiaryMemory],
     top_k: int,
 ) -> tuple[str, list[dict[str, Any]]]:
-    query_text = query_for_target(target)
+    query_text = query_for_target(target, target_spec, query_mode)
     query = build_query_spec(query_text, override_window=(target.date, target.date))
     rows = []
     for memory in memories:
@@ -229,6 +343,8 @@ def rank_simple_rag_evidence(
 def rank_chronological_evidence(
     *,
     target: DiaryMemory,
+    target_spec: TargetSpec,
+    query_mode: str,
     memories: list[DiaryMemory],
     top_k: int,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -254,6 +370,8 @@ def rank_baseline(
     *,
     spec: BaselineSpec,
     target: DiaryMemory,
+    target_spec: TargetSpec,
+    query_mode: str,
     memories: list[DiaryMemory],
     top_k: int,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -261,32 +379,49 @@ def rank_baseline(
     if spec.kind == "mira":
         return rank_mira_evidence(
             target=target,
+            target_spec=target_spec,
+            query_mode=query_mode,
             memories=scoped,
             top_k=top_k,
-            use_trust_weighting=spec.use_trust_weighting,
+            trust_strategy=spec.trust_strategy,
         )
     if spec.kind == "simple_rag":
-        return rank_simple_rag_evidence(target=target, memories=scoped, top_k=top_k)
+        return rank_simple_rag_evidence(target=target, target_spec=target_spec, query_mode=query_mode, memories=scoped, top_k=top_k)
     if spec.kind == "chronological":
-        return rank_chronological_evidence(target=target, memories=scoped, top_k=top_k)
+        return rank_chronological_evidence(target=target, target_spec=target_spec, query_mode=query_mode, memories=scoped, top_k=top_k)
     raise ValueError(f"Unknown baseline kind: {spec.kind}")
 
 
-def evaluate_rows(target: DiaryMemory, rows: list[dict[str, Any]], top_k: int) -> dict[str, float | None]:
+def evaluate_rows(
+    target: DiaryMemory,
+    rows: list[dict[str, Any]],
+    top_k: int,
+    *,
+    event_truth: EventTruth | None,
+    confuser_dates: set[str],
+    confidence_mode: str,
+) -> dict[str, float | None]:
     target_terms = set(salient_terms(target))
+    event_terms = set(salient_terms_from_text(event_truth.fact_text())) if event_truth else set()
     evidence_terms: set[str] = set()
     audit_ready = 0
     supported = 0
     trust_violations = 0
     direct_leaks = 0
     inferred_rows = 0
-    contradiction_needed = any(term in target_terms for term in {"contradict", "conflict", "argument", "never", "always"})
+    contradiction_needed = bool(event_truth and event_truth.contradiction) or any(
+        term in target_terms for term in {"contradict", "conflict", "argument", "never", "always"}
+    )
     contradiction_evidence = 0
     trust_sum = 0.0
+    target_date_hits = 0
+    confuser_hits = 0
 
     for row in rows:
         memory: DiaryMemory = row["memory"]
         evidence_terms.update(tokenize(memory.text))
+        target_date_hits += 1 if memory.date == target.date else 0
+        confuser_hits += 1 if memory.date in confuser_dates else 0
         trust_payload = memory.trust_payload()
         has_provenance = bool(trust_payload["provenance_ids"] or trust_payload["provenance_steps"])
         audit_ready += 1 if has_provenance else 0
@@ -302,23 +437,49 @@ def evaluate_rows(target: DiaryMemory, rows: list[dict[str, Any]], top_k: int) -
             contradiction_evidence += 1
         trust_sum += float(memory.trust_level or 0.5)
 
-    reconstruction_recall = len(target_terms.intersection(evidence_terms)) / max(len(target_terms), 1)
+    diary_term_recall = len(target_terms.intersection(evidence_terms)) / max(len(target_terms), 1)
+    if event_terms:
+        event_hits = len(event_terms.intersection(evidence_terms))
+        event_recall = event_hits / max(len(event_terms), 1)
+        event_precision = event_hits / max(len(evidence_terms), 1)
+        event_f1 = (2 * event_precision * event_recall / (event_precision + event_recall)) if event_precision + event_recall else 0.0
+        reconstruction_recall = event_recall
+    else:
+        event_recall = None
+        event_precision = None
+        event_f1 = None
+        reconstruction_recall = diary_term_recall
     source_precision = supported / max(len(rows), 1)
     audit_success_rate = audit_ready / max(len(rows), 1)
     avg_trust = trust_sum / max(len(rows), 1)
-    evidence_confidence = avg_trust * source_precision * min(1.0, len(rows) / max(top_k, 1))
+    coverage = min(1.0, len(rows) / max(top_k, 1))
+    target_date_precision = target_date_hits / max(len(rows), 1)
+    raw_trust_confidence = avg_trust * source_precision * coverage
+    date_calibration = 0.5 + 0.5 * target_date_precision
+    date_calibrated_confidence = raw_trust_confidence * date_calibration
+    evidence_confidence = date_calibrated_confidence if confidence_mode == "date_calibrated" else raw_trust_confidence
     confidence_error = abs(evidence_confidence - reconstruction_recall)
     trust_violation_rate = trust_violations / max(inferred_rows, 1) if inferred_rows else 0.0
+    contradiction_terms = set(salient_terms_from_text(event_truth.contradiction)) if event_truth and event_truth.contradiction else set()
+    contradiction_preserved = bool(contradiction_evidence or contradiction_terms.intersection(evidence_terms))
 
     return {
         "reconstruction_recall": reconstruction_recall,
+        "diary_term_recall": diary_term_recall,
+        "event_recall": event_recall,
+        "event_precision": event_precision,
+        "event_f1": event_f1,
         "source_precision": source_precision,
         "evidence_confidence": evidence_confidence,
+        "raw_trust_confidence": raw_trust_confidence,
+        "date_calibrated_confidence": date_calibrated_confidence,
         "confidence_error": confidence_error,
         "trust_violation_rate": trust_violation_rate,
         "direct_override_error": 1.0 if direct_leaks else 0.0,
+        "target_date_precision": target_date_precision,
+        "confuser_intrusion_rate": confuser_hits / max(len(rows), 1),
         "contradiction_preservation": (
-            1.0 if contradiction_evidence else 0.0
+            1.0 if contradiction_preserved else 0.0
         ) if contradiction_needed else None,
         "audit_success_rate": audit_success_rate,
         "avg_trust_level": avg_trust,
@@ -333,6 +494,7 @@ def serialize_row(row: dict[str, Any]) -> dict[str, Any]:
         "source_type": memory.source_type,
         "ranking_score": round(float(row["ranking_score"]), 6),
         "base_score": round(float(row["score"]), 6),
+        "confidence_score": round(float(row.get("confidence_score", row["ranking_score"])), 6),
         "trust": memory.trust_payload(),
         "preview": compact_text(memory.text, 180),
     }
@@ -353,6 +515,11 @@ def summarize(results: list[RankingResult]) -> dict[str, dict[str, float]]:
     return out
 
 
+def metric_value(metrics: dict[str, Any], name: str, default: float = 0.0) -> float:
+    value = metrics.get(name)
+    return float(value) if value is not None else default
+
+
 def write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -362,23 +529,25 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         f"Hidden diary targets: {payload['target_count']}",
         f"Memory pool size: {payload['memory_count']}",
         f"Top-k evidence: {payload['top_k']}",
+        f"Query mode: {payload['query_mode']}",
         "",
         "## Aggregate Metrics",
         "",
-        "| Model | Recall | Source Precision | Confidence Error | Trust Violations | Direct Override | Audit Success | Avg Trust |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Model | Event Recall | Event F1 | Date Precision | Confuser Intrusion | Confidence Error | Direct Override | Audit Success | Avg Trust |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for model, metrics in payload["summary"].items():
         lines.append(
-            "| {model} | {recall:.3f} | {source_precision:.3f} | {confidence_error:.3f} | {trust_violation:.3f} | {direct_override:.3f} | {audit:.3f} | {avg_trust:.3f} |".format(
+            "| {model} | {recall:.3f} | {event_f1:.3f} | {date_precision:.3f} | {confuser:.3f} | {confidence_error:.3f} | {direct_override:.3f} | {audit:.3f} | {avg_trust:.3f} |".format(
                 model=model,
-                recall=metrics.get("reconstruction_recall", 0.0),
-                source_precision=metrics.get("source_precision", 0.0),
-                confidence_error=metrics.get("confidence_error", 0.0),
-                trust_violation=metrics.get("trust_violation_rate", 0.0),
-                direct_override=metrics.get("direct_override_error", 0.0),
-                audit=metrics.get("audit_success_rate", 0.0),
-                avg_trust=metrics.get("avg_trust_level", 0.0),
+                recall=metric_value(metrics, "reconstruction_recall"),
+                event_f1=metric_value(metrics, "event_f1"),
+                date_precision=metric_value(metrics, "target_date_precision"),
+                confuser=metric_value(metrics, "confuser_intrusion_rate"),
+                confidence_error=metric_value(metrics, "confidence_error"),
+                direct_override=metric_value(metrics, "direct_override_error"),
+                audit=metric_value(metrics, "audit_success_rate"),
+                avg_trust=metric_value(metrics, "avg_trust_level"),
             )
         )
     lines.extend([
@@ -394,7 +563,9 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"### {case['target_id']} ({case['target_date']})")
         lines.append("")
         lines.append(f"- query: `{case['query']}`")
-        lines.append(f"- recall: `{case['metrics']['reconstruction_recall']:.3f}`")
+        lines.append(f"- event recall: `{case['metrics']['reconstruction_recall']:.3f}`")
+        if case["metrics"].get("event_f1") is not None:
+            lines.append(f"- event f1: `{case['metrics']['event_f1']:.3f}`")
         lines.append("- evidence:")
         for row in case["evidence"][:3]:
             lines.append(
@@ -407,12 +578,13 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     args = parse_args()
     diary_files = diary_files_from_root(args.diary_root)
-    target_dates = load_target_dates(args.target_dates_file)
+    target_specs = load_target_specs(args.target_dates_file)
+    events_by_id, events_by_date = load_event_truths(args.ground_truth_events)
     diary_targets = parse_diary_memories(files=diary_files)
     if not diary_targets:
         raise SystemExit("No diary targets found. Add dated diary files under data/diaries or set DIARY_ROOT/DIARY_FILES.")
-    if target_dates:
-        diary_targets = [memory for memory in diary_targets if memory.date in target_dates]
+    if target_specs:
+        diary_targets = [memory for memory in diary_targets if memory.date in target_specs]
         if not diary_targets:
             raise SystemExit(f"No diary targets matched dates from {args.target_dates_file}")
 
@@ -436,6 +608,13 @@ def main() -> int:
 
     results: list[RankingResult] = []
     for target in targets:
+        target_spec = target_specs.get(target.date, TargetSpec(target_date=target.date))
+        event_truth = events_by_id.get(target_spec.event_id or "") or events_by_date.get(target.date)
+        confuser_dates = {
+            truth.date
+            for truth in events_by_id.values()
+            if target.date in truth.confuser_for or truth.event_id in target_spec.confuser_event_ids
+        }
         evidence_pool = allowed_evidence(memories, target)
         if not evidence_pool:
             continue
@@ -443,16 +622,28 @@ def main() -> int:
             query, rows = rank_baseline(
                 spec=spec,
                 target=target,
+                target_spec=target_spec,
+                query_mode=args.query_mode,
                 memories=evidence_pool,
                 top_k=args.top_k,
             )
             results.append(
                 RankingResult(
                     target=target,
+                    target_spec=target_spec,
+                    event_truth=event_truth,
+                    query_mode=args.query_mode,
                     query=query,
                     model=spec.name,
                     rows=rows,
-                    metrics=evaluate_rows(target, rows, args.top_k),
+                    metrics=evaluate_rows(
+                        target,
+                        rows,
+                        args.top_k,
+                        event_truth=event_truth,
+                        confuser_dates=confuser_dates,
+                        confidence_mode=spec.confidence_mode,
+                    ),
                 )
             )
 
@@ -461,12 +652,16 @@ def main() -> int:
         "target_count": len({result.target.entry_id for result in results}),
         "memory_count": len(memories),
         "top_k": args.top_k,
+        "query_mode": args.query_mode,
+        "ground_truth_event_count": len(events_by_id),
         "summary": summarize(results),
         "cases": [
             {
                 "model": result.model,
                 "target_id": result.target.entry_id,
                 "target_date": result.target.date,
+                "event_id": result.target_spec.event_id,
+                "query_mode": result.query_mode,
                 "query": result.query,
                 "metrics": result.metrics,
                 "evidence": [serialize_row(row) for row in result.rows],
@@ -480,15 +675,17 @@ def main() -> int:
     write_report(args.report, payload)
 
     if args.json:
-        print(json.dumps({"summary": payload["summary"], "target_count": payload["target_count"]}, indent=2))
+        print(json.dumps({"summary": payload["summary"], "target_count": payload["target_count"], "query_mode": args.query_mode}, indent=2))
     else:
-        print(f"targets={payload['target_count']} memories={payload['memory_count']} top_k={payload['top_k']}")
+        print(f"targets={payload['target_count']} memories={payload['memory_count']} top_k={payload['top_k']} query_mode={args.query_mode}")
         for model, metrics in payload["summary"].items():
             print(
-                f"{model}: recall={metrics.get('reconstruction_recall', 0):.3f} "
-                f"source_precision={metrics.get('source_precision', 0):.3f} "
-                f"confidence_error={metrics.get('confidence_error', 0):.3f} "
-                f"audit={metrics.get('audit_success_rate', 0):.3f}"
+                f"{model}: recall={metric_value(metrics, 'reconstruction_recall'):.3f} "
+                f"event_f1={metric_value(metrics, 'event_f1'):.3f} "
+                f"date_precision={metric_value(metrics, 'target_date_precision'):.3f} "
+                f"confuser={metric_value(metrics, 'confuser_intrusion_rate'):.3f} "
+                f"confidence_error={metric_value(metrics, 'confidence_error'):.3f} "
+                f"audit={metric_value(metrics, 'audit_success_rate'):.3f}"
             )
         print(f"wrote {args.report}")
         print(f"wrote {args.metrics}")

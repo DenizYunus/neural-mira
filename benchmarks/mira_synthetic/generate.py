@@ -29,6 +29,8 @@ class Event:
     photo_caption: str
     contradiction: str = ""
     correction: str = ""
+    sparse_hint: str = ""
+    confuser_for: tuple[str, ...] = ()
     target: bool = False
 
 
@@ -236,6 +238,57 @@ EVENTS: tuple[Event, ...] = (
         photo_caption="Draft message with a deleted paragraph highlighted.",
         target=True,
     ),
+    Event(
+        date="2026-01-13",
+        title="Notebook archive",
+        mood=3,
+        icons=("notebook", "archive", "coffee"),
+        people=("Maya", "Sara"),
+        location="Karga Cafe",
+        truth="Maya organized old notebook pages at Karga Cafe without losing anything.",
+        diary="I sorted old notebook pages at Karga Cafe with Sara. The black notebook stayed on the table the whole time. It was admin, not panic.",
+        chat=(
+            ("15:05:00", "Sara", "You brought the black notebook again. This time it is definitely on the table."),
+            ("15:08:00", "Maya", "No bus drama today. Just archiving old pages and drinking coffee."),
+            ("15:12:00", "Sara", "Good. Let the notebook have a boring day."),
+        ),
+        photo_caption="Black notebook open beside archived pages and coffee.",
+        confuser_for=("2026-01-11",),
+    ),
+    Event(
+        date="2026-01-14",
+        title="Berlin spreadsheet cleanup",
+        mood=3,
+        icons=("berlin", "budget", "admin"),
+        people=("Maya", "Sara"),
+        location="home",
+        truth="Maya revised the Berlin budget spreadsheet after already accepting the workshop.",
+        diary="Sara and I cleaned up the Berlin budget spreadsheet. This was not the decision day anymore, just making the accepted workshop feel practical.",
+        chat=(
+            ("10:02:00", "Sara", "Budget cleanup looks less scary now."),
+            ("10:06:00", "Maya", "Yes. Important detail: this is after accepting, not me deciding again."),
+            ("10:09:00", "Sara", "Exactly. Implementation day, not courage day."),
+        ),
+        photo_caption="Berlin budget spreadsheet with travel rows highlighted.",
+        confuser_for=("2026-01-04", "2026-01-08", "2026-01-09"),
+    ),
+    Event(
+        date="2026-01-15",
+        title="Dry vocal practice",
+        mood=4,
+        icons=("music", "practice", "studio"),
+        people=("Maya", "Leo"),
+        location="small studio",
+        truth="Maya and Leo practiced vocals normally with no metro delay or recovery session.",
+        diary="Leo and I had a normal dry vocal practice. No rain, no missed rehearsal, no dramatic redemption arc. Just repetition until the second harmony settled.",
+        chat=(
+            ("17:18:00", "Leo", "Normal practice day. Weirdly peaceful."),
+            ("17:21:00", "Maya", "No rain, no metro, no guilt. I support this genre."),
+            ("17:24:00", "Leo", "Track title: Nothing Went Wrong in B Minor."),
+        ),
+        photo_caption="Studio lyric sheet from a normal vocal practice.",
+        confuser_for=("2026-01-02", "2026-01-06"),
+    ),
 )
 
 
@@ -293,6 +346,22 @@ def write_chats() -> None:
         (folder / "chat.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def public_hint(event: Event) -> str:
+    people = ", ".join(event.people)
+    return f"Public metadata: people={people}; location={event.location}."
+
+
+def sparse_user_hint(event: Event) -> str:
+    if event.sparse_hint:
+        return f"User hint: {event.sparse_hint}."
+    keywords = ", ".join(event.icons[:2])
+    return f"User hint: {keywords}."
+
+
+def confuser_event_ids(target_date: str) -> list[str]:
+    return [f"event:{event.date}" for event in EVENTS if target_date in event.confuser_for]
+
+
 def write_metadata() -> None:
     events = [
         {
@@ -307,6 +376,7 @@ def write_metadata() -> None:
             "target": event.target,
             "contradiction": event.contradiction,
             "correction": event.correction,
+            "confuser_for": list(event.confuser_for),
         }
         for event in EVENTS
     ]
@@ -324,6 +394,9 @@ def write_metadata() -> None:
         {
             "target_date": event.date,
             "event_id": f"event:{event.date}",
+            "public_hint": public_hint(event),
+            "sparse_user_hint": sparse_user_hint(event),
+            "confuser_event_ids": confuser_event_ids(event.date),
             "reason": "hidden diary day with indirect chat/photo evidence",
         }
         for event in EVENTS
@@ -334,6 +407,14 @@ def write_metadata() -> None:
             "query": f"Reconstruct what happened around {event.date}.",
             "target_date": event.date,
             "gold_event_id": f"event:{event.date}",
+            "query_modes": {
+                "date_only": f"Reconstruct what happened around {event.date}.",
+                "date_plus_public_metadata": f"Reconstruct what happened around {event.date}. {public_hint(event)}",
+                "sparse_user_hint": f"Reconstruct what happened around {event.date}. {sparse_user_hint(event)}",
+            },
+            "public_hint": public_hint(event),
+            "sparse_user_hint": sparse_user_hint(event),
+            "confuser_event_ids": confuser_event_ids(event.date),
             "must_not_present_as_direct": True,
             "expected_sources": ["diary_hidden_label", "whatsapp", "photo_metadata"],
         }
@@ -369,10 +450,13 @@ Contents:
 - `diaries/maya_aydin_2026.md`: first-person diary labels
 - `whatsapp/*/chat.txt`: WhatsApp-style indirect evidence
 - `ground_truth/events.jsonl`: hidden event truth table
-- `queries/reconstruction_targets.jsonl`: dates to hide/evaluate
-- `queries/reconstruction_queries.jsonl`: query metadata for future human/LLM eval
+- `queries/reconstruction_targets.jsonl`: dates, query hints, and confuser IDs
+- `queries/reconstruction_queries.jsonl`: query-mode metadata for future human/LLM eval
 - `photos/photo_metadata.jsonl`: metadata-only photo evidence
 - `corrections.jsonl`: explicit user corrections
+
+The target rows support date-only, public-metadata, and sparse-hint query modes.
+Confuser events are included as adversarial distractors for intrusion scoring.
 
 Use:
 

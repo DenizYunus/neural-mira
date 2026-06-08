@@ -89,6 +89,7 @@ memory whose provenance points at the hidden day, and retrieves indirect
 evidence. It now reports the first required paper baselines:
 
 - `mira_trust`: scalar MIRA with source-trust weighting
+- `mira_trust_v2`: scalar MIRA retrieval first, trust-calibrated confidence second
 - `mira_no_trust`: same scorer with trust weighting disabled
 - `simple_rag_all`: lexical cosine over all allowed memories
 - `diary_only`: MIRA over direct diary memories only
@@ -106,9 +107,10 @@ data/reconstruction_report.md
 data/reconstruction_metrics.json
 ```
 
-This is the scaffold for the arXiv claim: the final paper version should add
-public/synthetic splits, human-validated queries, dense retrieval, and
-LLM/long-context baselines where feasible.
+When `--ground-truth-events` is supplied, the headline metric is event-level
+reconstruction against gold facts rather than lexical overlap with the hidden
+diary entry. The report also includes target-date precision, contradiction
+preservation, direct diary leakage, audit success, and confuser intrusion.
 
 ## Public synthetic benchmark
 
@@ -125,6 +127,17 @@ diary labels, WhatsApp-style chats, photo metadata, ground truth events,
 corrections, and hidden target dates. The synthetic reconstruction command
 passes diary labels, chats, and photo metadata into the benchmark, while keeping
 local private reflections out of the public run.
+
+The benchmark supports query modes:
+
+- `date_only`: only the target date is visible.
+- `date_plus_public_metadata`: date plus safe people/location metadata.
+- `sparse_user_hint`: date plus a short user-style hint.
+- `legacy_hidden_label`: old diagnostic mode with hidden diary mood/icons.
+
+The synthetic corpus also contains adversarial confuser events with similar
+entities or topics. These are scored with `confuser_intrusion_rate` so a model
+is penalized for retrieving the wrong notebook/Berlin/music day.
 
 ## Baseline sweep
 
