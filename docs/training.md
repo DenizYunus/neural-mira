@@ -16,6 +16,20 @@ cp .env.example .env
 # Edit .env: set LLM_API_KEY (any OpenAI-compatible endpoint via LLM_BASE_URL).
 ```
 
+To reuse another private env file without copying secrets into this repo, set
+`NM_ENV_FILE` for the command:
+
+```bash
+NM_ENV_FILE=/path/to/private/.env python scripts/generate_training_queries.py --limit 10
+```
+
+PowerShell:
+
+```powershell
+$env:NM_ENV_FILE="C:\path\to\private\.env"
+python scripts\generate_training_queries.py --limit 10
+```
+
 ## 0. Have a diary
 
 Drop one or more `.md` files into `data/diaries/`. See [`data/README.md`](../data/README.md) for the expected DailyBean / bullet-style markdown formats.

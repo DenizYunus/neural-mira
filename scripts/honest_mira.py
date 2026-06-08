@@ -30,6 +30,7 @@ from htema_core import (
     feature_vector,
     parse_all_memories,
     parse_diary_memories,
+    source_weight,
     tokenize,
 )
 
@@ -113,6 +114,11 @@ SOURCE_FEATURE_NAMES = [
     "source_match",
     "participant_match",
     "participant_count_norm",
+    "source_weight",
+    "source_trust_level",
+    "source_reliability",
+    "memory_is_direct",
+    "memory_is_inferred",
 ]
 
 
@@ -429,6 +435,10 @@ def source_feature_values(memory: DiaryMemory, query_text: str, query_tokens: se
     for participant in getattr(memory, "participants", ()):
         participant_tokens.update(tokenize(participant))
     participant_match = len(query_tokens.intersection(participant_tokens)) / max(len(query_tokens), 1)
+    evidence_type = str(getattr(memory, "evidence_type", "") or "")
+    inference_status = str(getattr(memory, "inference_status", "") or "")
+    trust_level = float(getattr(memory, "trust_level", 0.5) or 0.5)
+    source_reliability = float(getattr(memory, "source_reliability", 0.5) or 0.5)
 
     return [
         wants_whatsapp,
@@ -444,6 +454,11 @@ def source_feature_values(memory: DiaryMemory, query_text: str, query_tokens: se
         source_match,
         min(1.0, participant_match * 3.0),
         min(len(getattr(memory, "participants", ())), 8) / 8,
+        source_weight(source_type),
+        trust_level,
+        source_reliability,
+        1.0 if evidence_type in {"direct", "direct_fragment"} else 0.0,
+        1.0 if inference_status in {"derived", "inferred", "speculative"} else 0.0,
     ]
 
 

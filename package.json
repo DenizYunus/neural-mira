@@ -14,6 +14,7 @@
     "evaluate": "python3 scripts/evaluate_htema.py",
     "baselines": "python3 scripts/evaluate_baselines.py",
     "honest:mira": "python3 scripts/honest_mira.py",
+    "reconstruction:bench": "python scripts/reconstruction_benchmark.py",
     "mira:search": "python3 scripts/search_mira.py",
     "eval:gate": "python scripts/eval_gate.py",
     "reflect": "python3 scripts/reflect.py",

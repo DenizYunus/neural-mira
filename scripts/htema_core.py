@@ -198,6 +198,40 @@ FEATURE_NAMES = [
 #
 # Applied as a post-rerank multiplier in mira_service / search_mira so we
 # don't have to retrain the model whenever the policy changes.
+
+@dataclass(frozen=True)
+class TrustProfile:
+    evidence_type: str
+    score_weight: float
+    trust_level: float
+    source_reliability: float
+    inference_status: str
+    visibility_label: str
+
+
+SOURCE_TRUST_PROFILES: dict[str, TrustProfile] = {
+    "diary": TrustProfile("direct", 1.0, 0.95, 0.95, "observed", "direct diary memory"),
+    "whatsapp": TrustProfile("conversation", 1.0, 0.75, 0.80, "observed", "conversation evidence"),
+    "atom": TrustProfile("direct_fragment", 0.95, 0.90, 0.95, "derived", "diary fragment"),
+    "reflection": TrustProfile("reflection", 0.90, 0.55, 0.70, "derived", "derived reflection"),
+    "rollup_week": TrustProfile("rollup", 0.85, 0.70, 0.85, "derived", "derived weekly rollup"),
+    "rollup_month": TrustProfile("rollup", 0.75, 0.65, 0.82, "derived", "derived monthly rollup"),
+    "whatsapp_synthetic": TrustProfile(
+        "llm_inference",
+        0.30,
+        0.30,
+        0.45,
+        "inferred",
+        "AI-summarized from WhatsApp",
+    ),
+}
+
+UNKNOWN_TRUST_PROFILE = TrustProfile("unknown", 1.0, 0.50, 0.50, "observed", "memory")
+
+
+def trust_profile(source_type: str) -> TrustProfile:
+    return SOURCE_TRUST_PROFILES.get(source_type, UNKNOWN_TRUST_PROFILE)
+
 SOURCE_WEIGHTS: dict[str, float] = {
     "diary": 1.0,              # primary source-of-truth — Deniz's own words
     "whatsapp": 1.0,           # raw conversation windows are first-class evidence
@@ -214,7 +248,7 @@ SOURCE_WEIGHTS: dict[str, float] = {
 def source_weight(source_type: str) -> float:
     """Return the trust multiplier for a memory source. Unknown sources default
     to 1.0 — we'd rather over-trust than silently drop a new memory kind."""
-    return SOURCE_WEIGHTS.get(source_type, 1.0)
+    return trust_profile(source_type).score_weight
 
 
 @dataclass(frozen=True)
@@ -236,6 +270,13 @@ class DiaryMemory:
     unresolved: float
     source_type: str = "diary"
     participants: tuple[str, ...] = ()
+    evidence_type: str | None = None
+    trust_level: float | None = None
+    source_reliability: float | None = None
+    inference_status: str | None = None
+    visibility_label: str | None = None
+    provenance_ids: tuple[str, ...] = ()
+    provenance_steps: tuple[str, ...] = ()
     # Provenance for derived memories (whatsapp_synthetic, future LLM-generated
     # sources). Empty for organic memories. ``provenance_kind`` describes what
     # was summarized ("messages", "rollup_window", ...); ``provenance_excerpts``
@@ -243,6 +284,38 @@ class DiaryMemory:
     # reader can audit any synthesized claim.
     provenance_kind: str | None = None
     provenance_excerpts: tuple[str, ...] = ()
+    contradicts: tuple[str, ...] = ()
+    supersedes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        profile = trust_profile(self.source_type)
+        if self.evidence_type is None:
+            object.__setattr__(self, "evidence_type", profile.evidence_type)
+        if self.trust_level is None:
+            object.__setattr__(self, "trust_level", profile.trust_level)
+        if self.source_reliability is None:
+            object.__setattr__(self, "source_reliability", profile.source_reliability)
+        if self.inference_status is None:
+            object.__setattr__(self, "inference_status", profile.inference_status)
+        if self.visibility_label is None:
+            object.__setattr__(self, "visibility_label", profile.visibility_label)
+
+    def trust_payload(self) -> dict[str, Any]:
+        return {
+            "source_type": self.source_type,
+            "evidence_type": self.evidence_type,
+            "trust_level": self.trust_level,
+            "source_reliability": self.source_reliability,
+            "source_weight": source_weight(self.source_type),
+            "inference_status": self.inference_status,
+            "visibility_label": self.visibility_label,
+            "provenance_kind": self.provenance_kind,
+            "provenance_ids": list(self.provenance_ids),
+            "provenance_steps": list(self.provenance_steps),
+            "provenance_excerpts": list(self.provenance_excerpts),
+            "contradicts": list(self.contradicts),
+            "supersedes": list(self.supersedes),
+        }
 
 
 @dataclass
@@ -406,6 +479,8 @@ def parse_diary_memories(files: list[Path] | None = None) -> list[DiaryMemory]:
                     unresolved=unresolved_score(part, icons),
                     source_type="diary",
                     participants=(),
+                    provenance_ids=(f"{rel_path}:{normalized}",),
+                    provenance_steps=("parse_diary_markdown",),
                 )
             )
     return sorted(memories, key=lambda item: item.ordinal)
@@ -533,6 +608,8 @@ def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> l
                    Windows shorter than this are filtered as noise.
     """
     root = root or WHATSAPP_ROOT
+    if root is None:
+        return []
     if not root.exists():
         return []
 
@@ -600,6 +677,8 @@ def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> l
                         unresolved=unresolved_score(combined_text, icons_tuple),
                         source_type="whatsapp",
                         participants=tuple(sorted(participants_set)),
+                        provenance_ids=(f"{rel_path}:{window_date}:{first.timestamp_ms}",),
+                        provenance_steps=("parse_whatsapp_export", "group_conversation_window"),
                     )
                 )
 
@@ -746,6 +825,8 @@ def _build_rollup(
         unresolved=float(clamp(sum(m.unresolved for m in children) / max(len(children), 1))),
         source_type=source_type,
         participants=(),
+        provenance_ids=tuple(child.entry_id for child in children),
+        provenance_steps=("build_rollup_memory",),
     )
 
 
@@ -874,6 +955,8 @@ def build_memory_atoms(
                 unresolved=unresolved_score(slice_full, parent.icons),
                 source_type="atom",
                 participants=parent.participants,
+                provenance_ids=(parent.entry_id,),
+                provenance_steps=("split_diary_atom",),
             ))
     return atoms
 
@@ -968,6 +1051,8 @@ def load_whatsapp_synthetic_memories(path: Path | None = None) -> list[DiaryMemo
             unresolved=0.0,
             source_type="whatsapp_synthetic",
             participants=participants,
+            provenance_ids=tuple(str(item) for item in row.get("source_ids") or []),
+            provenance_steps=("llm_summarize_whatsapp_day",),
             provenance_kind="messages",
             provenance_excerpts=tuple(
                 e.strip() for e in excerpts if isinstance(e, str) and e.strip()
@@ -1019,6 +1104,8 @@ def load_reflections(path: Path | None = None) -> list[DiaryMemory]:
             unresolved=float(row.get("unresolved") or 0.0),
             source_type="reflection",
             participants=tuple(sorted(str(item) for item in row.get("participants") or [])),
+            provenance_ids=tuple(str(item) for item in row.get("source_ids") or []),
+            provenance_steps=("build_reflection",),
         ))
     return out
 

@@ -1,16 +1,17 @@
 """Single source of truth for paths + LLM credentials.
 
-Reads `.env` from the repo root, falls back to sensible defaults, and exposes
-the resolved values as module-level constants. Importing this module is the
-only thing scripts need to do to know where the diary lives, where feedback
-comes from, and which LLM to call.
+Reads `.env` from the repo root plus an optional private env file referenced by
+`NM_ENV_FILE`, falls back to sensible defaults, and exposes the resolved values
+as module-level constants. Importing this module is the only thing scripts need
+to do to know where the diary lives, where feedback comes from, and which LLM to
+call.
 
 No third-party dependencies — there's a tiny in-house `.env` parser so the
 lab can be cloned and used without an extra `pip install`.
 
-Process environment wins over the `.env` file, so CLI overrides like
-``DIARY_ROOT=/tmp/test python scripts/htema_core.py ...`` work without
-editing the file.
+Process environment wins over `NM_ENV_FILE`, which wins over the repo `.env`
+file, so CLI overrides like ``DIARY_ROOT=/tmp/test python scripts/htema_core.py
+...`` work without editing the file.
 """
 
 from __future__ import annotations
@@ -42,12 +43,22 @@ def _load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
-_FILE_ENV = _load_env_file(LAB_ROOT / ".env")
+def _optional_env_path() -> Path | None:
+    raw = os.environ.get("NM_ENV_FILE", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else (LAB_ROOT / path)
+
+
+_LOCAL_ENV = _load_env_file(LAB_ROOT / ".env")
+_OPTIONAL_ENV_PATH = _optional_env_path()
+_PRIVATE_ENV = _load_env_file(_OPTIONAL_ENV_PATH) if _OPTIONAL_ENV_PATH else {}
 
 
 def _get(key: str, default: str = "") -> str:
-    """Process env wins (CLI overrides); .env file is the secondary source."""
-    return os.environ.get(key) or _FILE_ENV.get(key, default)
+    """Process env wins; optional private env wins over the repo .env."""
+    return os.environ.get(key) or _PRIVATE_ENV.get(key) or _LOCAL_ENV.get(key, default)
 
 
 def _resolve_path(value: str, default_relative: str) -> Path:
@@ -98,6 +109,8 @@ LLM_BASE_URL = _get("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_MODEL = _get("LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY = (
     _get("LLM_API_KEY")
+    or _get("DEEPSEEK_API_KEY")
+    or _get("MIRA_LLM_API_KEY")
     or _get("NVIDIA_API_KEY")
     or _get("OPENAI_API_KEY")
 )

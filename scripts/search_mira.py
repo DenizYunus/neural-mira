@@ -147,6 +147,7 @@ def main() -> int:
                 "icons": memory.icons,
                 "source_type": getattr(memory, "source_type", "diary"),
                 "participants": list(getattr(memory, "participants", ())),
+                "trust": memory.trust_payload(),
                 "preview": compact_text(memory.text, 900 if args.show_text else 360),
             }
         )
@@ -176,13 +177,17 @@ def main() -> int:
     print("calibration:", ", ".join(f"{key}={value:.2f}" for key, value in checkpoint["calibration"].items()))
     for result in results:
         print(
-            "\n#{rank} score={score:.3f} date={date} mood={mood} src={source_type} neural={neural:.2f} bm25={bm25:.2f} semantic={semantic:.2f} dense={dense:.2f} scalar={scalar:.2f}".format(
+            "\n#{rank} score={score:.3f} date={date} mood={mood} src={source_type} trust={trust_level:.2f} evidence={evidence_type} neural={neural:.2f} bm25={bm25:.2f} semantic={semantic:.2f} dense={dense:.2f} scalar={scalar:.2f}".format(
+                trust_level=float(result["trust"]["trust_level"] or 0.0),
+                evidence_type=result["trust"]["evidence_type"],
                 **result
             )
         )
         print(result["entry_id"])
         if result["source_type"] == "whatsapp" and result["participants"]:
             print("participants:", ", ".join(result["participants"][:6]))
+        if result["trust"].get("provenance_excerpts"):
+            print("provenance:", " | ".join(result["trust"]["provenance_excerpts"][:2]))
         print(result["preview"])
     return 0
 

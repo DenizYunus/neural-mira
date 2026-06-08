@@ -71,6 +71,7 @@ def main() -> int:
                             "icons": item["memory"].icons,
                             "score": item["score"],
                             "features": item["features"],
+                            "trust": item["memory"].trust_payload(),
                             "text": compact_text(item["memory"].text, 900),
                         }
                         for item in ranked
@@ -88,7 +89,10 @@ def main() -> int:
     for index, item in enumerate(ranked, start=1):
         memory = item["memory"]
         features = " ".join(f"{name}:{value:.2f}" for name, value in item["features"].items() if name != "bias")
-        print(f"{index}. {memory.date} mood={memory.mood or 'n/a'} score={item['score']:.3f}")
+        print(
+            f"{index}. {memory.date} mood={memory.mood or 'n/a'} "
+            f"score={item['score']:.3f} trust={memory.trust_level:.2f} evidence={memory.evidence_type}"
+        )
         print(memory.entry_id)
         print(features)
         print(compact_text(memory.text, 700))

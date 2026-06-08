@@ -320,6 +320,7 @@ def to_jsonl_row(
         "provenance_excerpts": [
             e.strip() for e in parsed["provenance_excerpts"] if isinstance(e, str) and e.strip()
         ],
+        "source_ids": [window.entry_id for window in windows],
         "participants": union,
         "message_window_count": len(windows),
         "message_total_chars": sum(len(w.text) for w in windows),

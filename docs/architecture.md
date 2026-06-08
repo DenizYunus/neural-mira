@@ -39,6 +39,16 @@ type DayMemory = {
     sourcePath: string
     chunkLocator: string
   }
+  trust: {
+    evidenceType: "direct" | "conversation" | "rollup" | "reflection" | "llm_inference"
+    trustLevel: number
+    sourceReliability: number
+    inferenceStatus: "observed" | "derived" | "inferred" | "speculative"
+    visibilityLabel: string
+    provenanceIds: string[]
+    provenanceSteps: string[]
+    provenanceExcerpts: string[]
+  }
 }
 ```
 

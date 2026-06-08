@@ -82,6 +82,34 @@ The aggregate report is written to:
 docs/honest_evaluation_report.md
 ```
 
+## Missing-day reconstruction benchmark
+
+The first paper-track benchmark hides direct diary days, removes any derived
+memory whose provenance points at the hidden day, and retrieves indirect
+evidence. It now reports the first required paper baselines:
+
+- `mira_trust`: scalar MIRA with source-trust weighting
+- `mira_no_trust`: same scorer with trust weighting disabled
+- `simple_rag_all`: lexical cosine over all allowed memories
+- `diary_only`: MIRA over direct diary memories only
+- `chat_only`: MIRA over WhatsApp / WhatsApp-synthetic memories only
+- `chronological_neighbors`: nearest allowed memories by date
+
+```bash
+npm run reconstruction:bench
+```
+
+Outputs stay under `data/` by default so private corpora do not leak into docs:
+
+```text
+data/reconstruction_report.md
+data/reconstruction_metrics.json
+```
+
+This is the scaffold for the arXiv claim: the final paper version should add
+public/synthetic splits, human-validated queries, dense retrieval, and
+LLM/long-context baselines where feasible.
+
 ## Baseline sweep
 
 Before claiming the architecture works, you should sanity-check baselines. The default mode uses only query text — no generated-label leakage:

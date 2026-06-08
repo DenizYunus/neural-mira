@@ -146,6 +146,8 @@ Full numbers + baseline comparisons in [`docs/evaluation.md`](docs/evaluation.md
 
 ## Deep dives
 
+- [**`docs/arxiv_roadmap.md`**](docs/arxiv_roadmap.md) - roadmap for a paper-worthy trust-weighted autobiographical memory reconstruction artifact
+
 - [**`docs/quickstart.md`**](docs/quickstart.md) — Anne Frank demo walkthrough + bring-your-own-diary setup
 - [**`docs/components.md`**](docs/components.md) — What's in the repo (3 retrieval layers, 5-level hierarchy, what each script does)
 - [**`docs/training.md`**](docs/training.md) — End-to-end training pipeline: synthesizing query examples, style augmentations, neural training, dense embedding cache, feedback-derived eval cases

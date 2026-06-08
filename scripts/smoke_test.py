@@ -112,6 +112,8 @@ def test_parse_diary_memories() -> None:
         check("mood parsed", m0.mood == 4, str(m0.mood))
         check("icons parsed", "writing" in m0.icons, str(m0.icons))
         check("text body captured", len(m0.text) > 20, f"{len(m0.text)} chars")
+        check("direct diary trust profile attached", m0.evidence_type == "direct", str(m0.trust_payload()))
+        check("trust provenance points at source", bool(m0.provenance_ids), str(m0.provenance_ids))
         check("entries sorted by date", [m.date for m in memories] ==
               sorted(m.date for m in memories))
 
