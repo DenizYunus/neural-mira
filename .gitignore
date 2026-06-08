@@ -17,6 +17,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# --- Benchmark run outputs --------------------------------------------------
+benchmarks/mira_synthetic/generated/reconstruction_report.md
+benchmarks/mira_synthetic/generated/reconstruction_metrics.json
+
 # --- Editor / OS noise ------------------------------------------------------
 .DS_Store
 Thumbs.db

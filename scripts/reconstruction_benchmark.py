@@ -95,6 +95,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-targets", type=int, default=40, help="Maximum hidden diary days to evaluate. Use 0 for all.")
     parser.add_argument("--top-k", type=int, default=8, help="Evidence memories retrieved per hidden day.")
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument("--diary-root", type=Path, help="Directory or file containing dated markdown diary labels.")
+    parser.add_argument("--whatsapp-root", type=Path, help="Directory containing WhatsApp-style chat export folders.")
+    parser.add_argument("--photo-metadata", type=Path, help="JSONL file containing dated photo metadata evidence.")
+    parser.add_argument("--target-dates-file", type=Path, help="JSONL/TXT file listing target dates to hide/evaluate.")
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--no-rollups", action="store_true", help="Exclude week/month rollup memories.")
@@ -102,6 +106,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-reflections", action="store_true", help="Exclude reflection memories.")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
+
+
+def diary_files_from_root(path: Path | None) -> list[Path] | None:
+    if path is None:
+        return None
+    if path.is_file():
+        return [path]
+    if not path.exists():
+        raise SystemExit(f"diary root not found: {path}")
+    return sorted(file_path for file_path in path.glob("*.md") if file_path.is_file())
+
+
+def load_target_dates(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    if not path.exists():
+        raise SystemExit(f"target dates file not found: {path}")
+    dates: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("{"):
+            row = json.loads(line)
+            value = row.get("target_date") or row.get("date")
+        else:
+            value = line
+        if isinstance(value, str) and value:
+            dates.add(value[:10])
+    return dates
 
 
 def salient_terms(memory: DiaryMemory, *, limit: int = 36) -> tuple[str, ...]:
@@ -372,11 +406,21 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
-    diary_targets = parse_diary_memories()
+    diary_files = diary_files_from_root(args.diary_root)
+    target_dates = load_target_dates(args.target_dates_file)
+    diary_targets = parse_diary_memories(files=diary_files)
     if not diary_targets:
         raise SystemExit("No diary targets found. Add dated diary files under data/diaries or set DIARY_ROOT/DIARY_FILES.")
+    if target_dates:
+        diary_targets = [memory for memory in diary_targets if memory.date in target_dates]
+        if not diary_targets:
+            raise SystemExit(f"No diary targets matched dates from {args.target_dates_file}")
 
     memories = parse_all_memories(
+        diary_files=diary_files,
+        whatsapp_root=args.whatsapp_root,
+        photo_metadata_path=args.photo_metadata,
+        include_photo_metadata=bool(args.photo_metadata),
         include_rollups=not args.no_rollups,
         include_atoms=not args.no_atoms,
     )

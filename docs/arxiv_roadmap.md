@@ -101,6 +101,10 @@ releasable benchmark with:
 The Anne Frank demo can stay as a public qualitative demo, but the main public
 benchmark should not depend on private or legally ambiguous data.
 
+Status: started. `benchmarks/mira_synthetic/generate.py` creates a deterministic
+public multi-source corpus with diary labels, WhatsApp-style chats, photo
+metadata, corrections, ground truth events, and hidden reconstruction targets.
+
 ### 4. Human-Validated Queries
 
 Generated queries are useful but not sufficient. Add 200-500 human-written or

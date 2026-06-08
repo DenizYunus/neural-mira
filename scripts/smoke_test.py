@@ -17,6 +17,7 @@ Exit code 0 = all checks passed, 1 = a check failed.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -144,12 +145,37 @@ def test_scalar_scoring() -> None:
               f"{distinct_scores} distinct scores across {len(ranked)} results")
 
 
+def test_parse_photo_metadata_memories() -> None:
+    print("htema_core.parse_photo_metadata_memories (JSONL -> metadata evidence)")
+    from htema_core import parse_photo_metadata_memories
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = Path(tmp) / "photos.jsonl"
+        row = {
+            "photo_id": "photo:2024-01-07",
+            "date": "2024-01-07",
+            "caption": "Notebook on a cafe table beside two coffee cups.",
+            "people": ["Maya", "Sara"],
+            "location": "Karga Cafe",
+        }
+        fixture.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+        memories = parse_photo_metadata_memories(fixture)
+
+    check("parsed one photo metadata row", len(memories) == 1, f"got {len(memories)}")
+    if memories:
+        memory = memories[0]
+        check("photo source type attached", memory.source_type == "photo_metadata", memory.source_type)
+        check("photo evidence has provenance", bool(memory.provenance_ids), str(memory.provenance_ids))
+        check("photo participants parsed", "Maya" in memory.participants, str(memory.participants))
+
+
 def main() -> int:
     print("=" * 60)
     print("Neural MIRA smoke test (hermetic, stdlib-only)")
     print("=" * 60)
     test_fetch_parse_entries()
     test_parse_diary_memories()
+    test_parse_photo_metadata_memories()
     test_scalar_scoring()
     print("=" * 60)
     if check.failed:  # type: ignore[attr-defined]

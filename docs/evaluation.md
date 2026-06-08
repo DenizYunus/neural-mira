@@ -110,6 +110,22 @@ This is the scaffold for the arXiv claim: the final paper version should add
 public/synthetic splits, human-validated queries, dense retrieval, and
 LLM/long-context baselines where feasible.
 
+## Public synthetic benchmark
+
+The Anne Frank demo is diary-only, so it cannot test chat-derived
+reconstruction. Generate the public multi-source synthetic corpus instead:
+
+```bash
+npm run synthetic:generate
+npm run synthetic:reconstruction
+```
+
+The corpus lives under `benchmarks/mira_synthetic/generated/` and includes
+diary labels, WhatsApp-style chats, photo metadata, ground truth events,
+corrections, and hidden target dates. The synthetic reconstruction command
+passes diary labels, chats, and photo metadata into the benchmark, while keeping
+local private reflections out of the public run.
+
 ## Baseline sweep
 
 Before claiming the architecture works, you should sanity-check baselines. The default mode uses only query text — no generated-label leakage:

@@ -212,6 +212,7 @@ class TrustProfile:
 SOURCE_TRUST_PROFILES: dict[str, TrustProfile] = {
     "diary": TrustProfile("direct", 1.0, 0.95, 0.95, "observed", "direct diary memory"),
     "whatsapp": TrustProfile("conversation", 1.0, 0.75, 0.80, "observed", "conversation evidence"),
+    "photo_metadata": TrustProfile("metadata", 0.80, 0.68, 0.75, "observed", "photo metadata evidence"),
     "atom": TrustProfile("direct_fragment", 0.95, 0.90, 0.95, "derived", "diary fragment"),
     "reflection": TrustProfile("reflection", 0.90, 0.55, 0.70, "derived", "derived reflection"),
     "rollup_week": TrustProfile("rollup", 0.85, 0.70, 0.85, "derived", "derived weekly rollup"),
@@ -235,6 +236,7 @@ def trust_profile(source_type: str) -> TrustProfile:
 SOURCE_WEIGHTS: dict[str, float] = {
     "diary": 1.0,              # primary source-of-truth — Deniz's own words
     "whatsapp": 1.0,           # raw conversation windows are first-class evidence
+    "photo_metadata": 0.8,      # dated metadata anchors events, but lacks first-person context
     "atom": 0.95,              # paragraph slice of a diary day — same fidelity, smaller window
     "reflection": 0.9,         # deterministic-rule reflections, slightly abstracted
     "rollup_week": 0.85,       # aggregated context — useful but less specific
@@ -685,10 +687,72 @@ def parse_whatsapp_memories(root: Path | None = None, min_chars: int = 200) -> l
     return sorted(memories, key=lambda item: item.ordinal)
 
 
+def parse_photo_metadata_memories(path: Path | None = None) -> list[DiaryMemory]:
+    """Parse JSONL photo metadata into indirect autobiographical evidence."""
+    if path is None or not path.exists():
+        return []
+
+    memories: list[DiaryMemory] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        normalized = normalize_date(str(row.get("date") or ""))
+        caption = str(row.get("caption") or "").strip()
+        if not normalized or not caption:
+            continue
+
+        people = tuple(sorted(str(item).strip() for item in row.get("people") or [] if str(item).strip()))
+        location = str(row.get("location") or "").strip()
+        photo_id = str(row.get("photo_id") or f"photo:{normalized}")
+        text_parts = [f"Photo metadata for {normalized}.", caption]
+        if location:
+            text_parts.append(f"Location: {location}.")
+        if people:
+            text_parts.append(f"People: {', '.join(people)}.")
+        text = " ".join(text_parts)
+        tokens = tuple(tokenize(text))
+        year, month, _ = (int(value) for value in normalized.split("-"))
+        rel_path = str(path.relative_to(LAB_ROOT)) if path.is_relative_to(LAB_ROOT) else str(path)
+
+        memories.append(
+            DiaryMemory(
+                entry_id=photo_id,
+                date=normalized,
+                ordinal=ordinal(normalized),
+                year=year,
+                month=month,
+                source_path=rel_path,
+                mood=None,
+                icons=(),
+                text=text,
+                tokens=tokens,
+                token_vector=vectorize(tokens),
+                emotion=emotion_vector(None, (), text),
+                diary_features=diary_feature_vector(text),
+                importance=memory_importance(None, (), text),
+                unresolved=unresolved_score(text, ()),
+                source_type="photo_metadata",
+                participants=people,
+                provenance_ids=(f"{rel_path}:{photo_id}",),
+                provenance_steps=("parse_photo_metadata_jsonl",),
+            )
+        )
+
+    return sorted(memories, key=lambda item: item.ordinal)
+
+
 def parse_all_memories(
     diary_files: list[Path] | None = None,
     whatsapp_root: Path | None = None,
     *,
+    photo_metadata_path: Path | None = None,
+    include_photo_metadata: bool = False,
     include_rollups: bool = False,
     include_atoms: bool = False,
     include_whatsapp_synthetic: bool | None = None,
@@ -697,12 +761,13 @@ def parse_all_memories(
     atom_min_chars: int = 80,
     atom_max_chars: int = 700,
 ) -> list[DiaryMemory]:
-    """Load diary AND WhatsApp memories into a unified sorted list.
+    """Load diary, WhatsApp, and optional photo metadata into one sorted list.
 
     When `include_rollups` is True, append synthetic week/month rollup tokens
     that aggregate child diary days. When `include_atoms` is True, append
-    paragraph-level memory atoms split out of long diary days. Both kinds carry
-    distinct `source_type` values so the source-feature head can attend to them.
+    paragraph-level memory atoms split out of long diary days. Each evidence
+    kind carries a distinct `source_type` so the source-feature head can attend
+    to trust and provenance differences.
 
     `include_whatsapp_synthetic` controls whether LLM-summarized WhatsApp
     fallback diaries are included. Default ``None`` = auto: include them iff
@@ -710,7 +775,8 @@ def parse_all_memories(
     """
     diary = parse_diary_memories(diary_files)
     whatsapp = parse_whatsapp_memories(whatsapp_root)
-    combined = diary + whatsapp
+    photos = parse_photo_metadata_memories(photo_metadata_path) if include_photo_metadata else []
+    combined = diary + whatsapp + photos
     extras: list[DiaryMemory] = []
     if include_atoms:
         extras.extend(build_memory_atoms(diary, min_chars=atom_min_chars, max_chars=atom_max_chars))

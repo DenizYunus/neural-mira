@@ -15,6 +15,8 @@
     "baselines": "python3 scripts/evaluate_baselines.py",
     "honest:mira": "python3 scripts/honest_mira.py",
     "reconstruction:bench": "python scripts/reconstruction_benchmark.py",
+    "synthetic:generate": "python benchmarks/mira_synthetic/generate.py",
+    "synthetic:reconstruction": "python scripts/reconstruction_benchmark.py --diary-root benchmarks/mira_synthetic/generated/diaries --whatsapp-root benchmarks/mira_synthetic/generated/whatsapp --photo-metadata benchmarks/mira_synthetic/generated/photos/photo_metadata.jsonl --target-dates-file benchmarks/mira_synthetic/generated/queries/reconstruction_targets.jsonl --report benchmarks/mira_synthetic/generated/reconstruction_report.md --metrics benchmarks/mira_synthetic/generated/reconstruction_metrics.json --no-reflections",
     "mira:search": "python3 scripts/search_mira.py",
     "eval:gate": "python scripts/eval_gate.py",
     "reflect": "python3 scripts/reflect.py",
