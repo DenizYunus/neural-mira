@@ -79,6 +79,7 @@ class EventTruth:
     date: str
     title: str
     truth: str
+    facts: dict[str, str]
     people: tuple[str, ...] = ()
     location: str = ""
     contradiction: str = ""
@@ -89,6 +90,7 @@ class EventTruth:
         parts = [
             self.title,
             self.truth,
+            " ".join(self.facts.values()),
             f"People: {', '.join(self.people)}." if self.people else "",
             f"Location: {self.location}." if self.location else "",
             self.contradiction,
@@ -107,6 +109,7 @@ class RankingResult:
     model: str
     rows: list[dict[str, Any]]
     metrics: dict[str, float | None]
+    reconstruction_text: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ class BaselineSpec:
 BASELINES = (
     BaselineSpec("mira_trust", "mira", trust_strategy="rank"),
     BaselineSpec("mira_trust_v2", "mira", trust_strategy="confidence", confidence_mode="date_calibrated"),
+    BaselineSpec("mira_trust_v3", "mira", trust_strategy="diverse_confidence", confidence_mode="date_calibrated"),
     BaselineSpec("mira_no_trust", "mira"),
     BaselineSpec("simple_rag_all", "simple_rag"),
     BaselineSpec("diary_only", "mira", source_types=("diary",)),
@@ -215,6 +219,11 @@ def load_event_truths(path: Path | None) -> tuple[dict[str, EventTruth], dict[st
             date=event_date,
             title=str(row.get("title") or ""),
             truth=str(row.get("truth") or ""),
+            facts={
+                str(key): str(value)
+                for key, value in (row.get("facts") or {}).items()
+                if str(key).strip() and str(value).strip()
+            },
             people=tuple(str(item) for item in row.get("people") or []),
             location=str(row.get("location") or ""),
             contradiction=str(row.get("contradiction") or ""),
@@ -247,6 +256,27 @@ def salient_terms_from_text(text: str, *, limit: int = 36) -> tuple[str, ...]:
     counts = Counter(terms)
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return tuple(term for term, _ in ranked[:limit])
+
+
+def fact_slot_support(facts: dict[str, str], evidence_terms: set[str]) -> dict[str, dict[str, float]]:
+    slots: dict[str, dict[str, float]] = {}
+    for slot, value in facts.items():
+        terms = set(salient_terms_from_text(value, limit=24))
+        if not terms:
+            continue
+        matched = terms.intersection(evidence_terms)
+        recall = len(matched) / max(len(terms), 1)
+        if len(terms) <= 2:
+            supported = recall >= 0.5
+        else:
+            supported = recall >= 0.34
+        slots[slot] = {
+            "recall": recall,
+            "supported": 1.0 if supported else 0.0,
+            "term_count": float(len(terms)),
+            "matched_count": float(len(matched)),
+        }
+    return slots
 
 
 def query_for_target(memory: DiaryMemory, target_spec: TargetSpec, query_mode: str) -> str:
@@ -300,6 +330,46 @@ def row_for_memory(memory: DiaryMemory, *, score: float, ranking_score: float, f
     }
 
 
+def trust_v3_rerank(target: DiaryMemory, rows: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    remaining = rows[:]
+    selected_sources: set[str] = set()
+    selected_non_target_dates: set[str] = set()
+
+    while remaining and len(selected) < top_k:
+        best_index = 0
+        best_score = float("-inf")
+        for index, row in enumerate(remaining):
+            memory: DiaryMemory = row["memory"]
+            base_score = float(row["score"])
+            day_distance = abs(memory.ordinal - target.ordinal)
+            same_date = memory.date == target.date
+            date_multiplier = 1.24 if same_date else (0.88 if day_distance <= 4 else 0.96)
+            source_multiplier = 1.08 if memory.source_type not in selected_sources else 0.94
+            repeat_neighbor_multiplier = 0.72 if (not same_date and memory.date in selected_non_target_dates) else 1.0
+            metadata_anchor = 1.05 if same_date and memory.source_type in {"whatsapp", "photo_metadata"} else 1.0
+            ranking_score = base_score * date_multiplier * source_multiplier * repeat_neighbor_multiplier * metadata_anchor
+            if ranking_score > best_score:
+                best_score = ranking_score
+                best_index = index
+
+        chosen = remaining.pop(best_index)
+        memory = chosen["memory"]
+        trust = source_weight(memory.source_type)
+        chosen["ranking_score"] = best_score
+        chosen["confidence_score"] = float(chosen["score"]) * trust
+        features = dict(chosen.get("features") or {})
+        features["trust_v3_same_date"] = 1.0 if memory.date == target.date else 0.0
+        features["trust_v3_day_distance"] = float(abs(memory.ordinal - target.ordinal))
+        chosen["features"] = features
+        selected.append(chosen)
+        selected_sources.add(memory.source_type)
+        if memory.date != target.date:
+            selected_non_target_dates.add(memory.date)
+
+    return selected
+
+
 def rank_mira_evidence(
     *,
     target: DiaryMemory,
@@ -318,6 +388,9 @@ def rank_mira_evidence(
         trust = source_weight(memory.source_type)
         row["ranking_score"] = base_score * trust if trust_strategy == "rank" else base_score
         row["confidence_score"] = base_score * trust if trust_strategy in {"rank", "confidence"} else base_score
+    if trust_strategy == "diverse_confidence":
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        return query_text, trust_v3_rerank(target, ranked, top_k)
     ranked.sort(key=lambda item: item["ranking_score"], reverse=True)
     return query_text, ranked[:top_k]
 
@@ -438,12 +511,19 @@ def evaluate_rows(
         trust_sum += float(memory.trust_level or 0.5)
 
     diary_term_recall = len(target_terms.intersection(evidence_terms)) / max(len(target_terms), 1)
+    fact_support = fact_slot_support(event_truth.facts, evidence_terms) if event_truth else {}
+    if fact_support:
+        structured_fact_recall = sum(slot["recall"] for slot in fact_support.values()) / len(fact_support)
+        fact_slot_accuracy = sum(slot["supported"] for slot in fact_support.values()) / len(fact_support)
+    else:
+        structured_fact_recall = None
+        fact_slot_accuracy = None
     if event_terms:
         event_hits = len(event_terms.intersection(evidence_terms))
         event_recall = event_hits / max(len(event_terms), 1)
         event_precision = event_hits / max(len(evidence_terms), 1)
         event_f1 = (2 * event_precision * event_recall / (event_precision + event_recall)) if event_precision + event_recall else 0.0
-        reconstruction_recall = event_recall
+        reconstruction_recall = structured_fact_recall if structured_fact_recall is not None else event_recall
     else:
         event_recall = None
         event_precision = None
@@ -469,6 +549,9 @@ def evaluate_rows(
         "event_recall": event_recall,
         "event_precision": event_precision,
         "event_f1": event_f1,
+        "structured_fact_recall": structured_fact_recall,
+        "fact_slot_accuracy": fact_slot_accuracy,
+        "fact_slot_count": float(len(fact_support)) if fact_support else None,
         "source_precision": source_precision,
         "evidence_confidence": evidence_confidence,
         "raw_trust_confidence": raw_trust_confidence,
@@ -500,6 +583,54 @@ def serialize_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def evidence_terms_for_rows(rows: list[dict[str, Any]]) -> set[str]:
+    terms: set[str] = set()
+    for row in rows:
+        memory: DiaryMemory = row["memory"]
+        terms.update(tokenize(memory.text))
+    return terms
+
+
+def build_reconstruction_text(target: DiaryMemory, rows: list[dict[str, Any]], metrics: dict[str, float | None]) -> str:
+    confidence = metric_value(metrics, "evidence_confidence")
+    if confidence >= 0.70:
+        confidence_label = "medium-high"
+    elif confidence >= 0.45:
+        confidence_label = "medium"
+    else:
+        confidence_label = "low"
+
+    source_labels = sorted({row["memory"].source_type for row in rows})
+    evidence_lines = []
+    for row in rows:
+        memory: DiaryMemory = row["memory"]
+        evidence_lines.append(
+            f"- {memory.source_type} {memory.date} ({memory.entry_id}): {compact_text(memory.text, 140)}"
+        )
+    return "\n".join([
+        f"Inferred reconstruction for {target.date}.",
+        f"Confidence: {confidence_label} ({confidence:.3f}).",
+        "This is not a direct diary memory; it is reconstructed from indirect and neighboring evidence.",
+        f"Evidence sources: {', '.join(source_labels) if source_labels else 'none'}.",
+        "Audit trail:",
+        *evidence_lines,
+    ])
+
+
+def reconstruction_audit_metrics(reconstruction_text: str, rows: list[dict[str, Any]]) -> dict[str, float]:
+    lowered = reconstruction_text.lower()
+    source_types = {row["memory"].source_type for row in rows}
+    source_mentions = sum(1 for source_type in source_types if source_type.lower() in lowered)
+    provenance_mentions = sum(1 for row in rows if str(row["memory"].entry_id).lower() in lowered)
+    return {
+        "uncertainty_label_success": 1.0 if "confidence:" in lowered else 0.0,
+        "inferred_label_success": 1.0 if "inferred reconstruction" in lowered else 0.0,
+        "not_direct_label_success": 1.0 if "not a direct diary memory" in lowered else 0.0,
+        "source_label_coverage": source_mentions / max(len(source_types), 1),
+        "audit_trail_coverage": provenance_mentions / max(len(rows), 1),
+    }
+
+
 def summarize(results: list[RankingResult]) -> dict[str, dict[str, float]]:
     by_model: dict[str, list[dict[str, float | None]]] = {}
     for result in results:
@@ -512,6 +643,27 @@ def summarize(results: list[RankingResult]) -> dict[str, dict[str, float]]:
             values = [float(row[name]) for row in rows if row.get(name) is not None]
             if values:
                 out[model][name] = sum(values) / len(values)
+    return out
+
+
+def summarize_slots(results: list[RankingResult]) -> dict[str, dict[str, dict[str, float]]]:
+    buckets: dict[str, dict[str, list[dict[str, float]]]] = {}
+    for result in results:
+        if not result.event_truth:
+            continue
+        support = fact_slot_support(result.event_truth.facts, evidence_terms_for_rows(result.rows))
+        for slot, metrics in support.items():
+            buckets.setdefault(result.model, {}).setdefault(slot, []).append(metrics)
+
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for model, slots in buckets.items():
+        out[model] = {}
+        for slot, rows in slots.items():
+            out[model][slot] = {
+                "recall": sum(row["recall"] for row in rows) / len(rows),
+                "accuracy": sum(row["supported"] for row in rows) / len(rows),
+                "n": float(len(rows)),
+            }
     return out
 
 
@@ -533,23 +685,42 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Aggregate Metrics",
         "",
-        "| Model | Event Recall | Event F1 | Date Precision | Confuser Intrusion | Confidence Error | Direct Override | Audit Success | Avg Trust |",
+        "| Model | Fact Recall | Fact Accuracy | Event F1 | Confuser Intrusion | Confidence Error | Not-Direct Label | Audit Trail | Source Labels |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for model, metrics in payload["summary"].items():
         lines.append(
-            "| {model} | {recall:.3f} | {event_f1:.3f} | {date_precision:.3f} | {confuser:.3f} | {confidence_error:.3f} | {direct_override:.3f} | {audit:.3f} | {avg_trust:.3f} |".format(
+            "| {model} | {recall:.3f} | {fact_accuracy:.3f} | {event_f1:.3f} | {confuser:.3f} | {confidence_error:.3f} | {not_direct:.3f} | {audit_trail:.3f} | {source_labels:.3f} |".format(
                 model=model,
                 recall=metric_value(metrics, "reconstruction_recall"),
+                fact_accuracy=metric_value(metrics, "fact_slot_accuracy"),
                 event_f1=metric_value(metrics, "event_f1"),
-                date_precision=metric_value(metrics, "target_date_precision"),
                 confuser=metric_value(metrics, "confuser_intrusion_rate"),
                 confidence_error=metric_value(metrics, "confidence_error"),
-                direct_override=metric_value(metrics, "direct_override_error"),
-                audit=metric_value(metrics, "audit_success_rate"),
-                avg_trust=metric_value(metrics, "avg_trust_level"),
+                not_direct=metric_value(metrics, "not_direct_label_success"),
+                audit_trail=metric_value(metrics, "audit_trail_coverage"),
+                source_labels=metric_value(metrics, "source_label_coverage"),
             )
         )
+    if payload.get("slot_summary"):
+        lines.extend([
+            "",
+            "## Per-Slot Fact Recovery",
+            "",
+            "| Model | Slot | Recall | Accuracy | N |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ])
+        for model, slots in payload["slot_summary"].items():
+            for slot, metrics in sorted(slots.items()):
+                lines.append(
+                    "| {model} | {slot} | {recall:.3f} | {accuracy:.3f} | {n:.0f} |".format(
+                        model=model,
+                        slot=slot,
+                        recall=metric_value(metrics, "recall"),
+                        accuracy=metric_value(metrics, "accuracy"),
+                        n=metric_value(metrics, "n"),
+                    )
+                )
     lines.extend([
         "",
         "## Lowest-Recall Cases",
@@ -563,7 +734,9 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"### {case['target_id']} ({case['target_date']})")
         lines.append("")
         lines.append(f"- query: `{case['query']}`")
-        lines.append(f"- event recall: `{case['metrics']['reconstruction_recall']:.3f}`")
+        lines.append(f"- fact recall: `{case['metrics']['reconstruction_recall']:.3f}`")
+        if case["metrics"].get("fact_slot_accuracy") is not None:
+            lines.append(f"- fact slot accuracy: `{case['metrics']['fact_slot_accuracy']:.3f}`")
         if case["metrics"].get("event_f1") is not None:
             lines.append(f"- event f1: `{case['metrics']['event_f1']:.3f}`")
         lines.append("- evidence:")
@@ -627,6 +800,16 @@ def main() -> int:
                 memories=evidence_pool,
                 top_k=args.top_k,
             )
+            metrics = evaluate_rows(
+                target,
+                rows,
+                args.top_k,
+                event_truth=event_truth,
+                confuser_dates=confuser_dates,
+                confidence_mode=spec.confidence_mode,
+            )
+            reconstruction_text = build_reconstruction_text(target, rows, metrics)
+            metrics.update(reconstruction_audit_metrics(reconstruction_text, rows))
             results.append(
                 RankingResult(
                     target=target,
@@ -636,14 +819,8 @@ def main() -> int:
                     query=query,
                     model=spec.name,
                     rows=rows,
-                    metrics=evaluate_rows(
-                        target,
-                        rows,
-                        args.top_k,
-                        event_truth=event_truth,
-                        confuser_dates=confuser_dates,
-                        confidence_mode=spec.confidence_mode,
-                    ),
+                    metrics=metrics,
+                    reconstruction_text=reconstruction_text,
                 )
             )
 
@@ -655,6 +832,7 @@ def main() -> int:
         "query_mode": args.query_mode,
         "ground_truth_event_count": len(events_by_id),
         "summary": summarize(results),
+        "slot_summary": summarize_slots(results),
         "cases": [
             {
                 "model": result.model,
@@ -663,7 +841,12 @@ def main() -> int:
                 "event_id": result.target_spec.event_id,
                 "query_mode": result.query_mode,
                 "query": result.query,
+                "reconstruction_text": result.reconstruction_text,
                 "metrics": result.metrics,
+                "fact_support": (
+                    fact_slot_support(result.event_truth.facts, evidence_terms_for_rows(result.rows))
+                    if result.event_truth else {}
+                ),
                 "evidence": [serialize_row(row) for row in result.rows],
             }
             for result in results
@@ -675,12 +858,18 @@ def main() -> int:
     write_report(args.report, payload)
 
     if args.json:
-        print(json.dumps({"summary": payload["summary"], "target_count": payload["target_count"], "query_mode": args.query_mode}, indent=2))
+        print(json.dumps({
+            "summary": payload["summary"],
+            "slot_summary": payload["slot_summary"],
+            "target_count": payload["target_count"],
+            "query_mode": args.query_mode,
+        }, indent=2))
     else:
         print(f"targets={payload['target_count']} memories={payload['memory_count']} top_k={payload['top_k']} query_mode={args.query_mode}")
         for model, metrics in payload["summary"].items():
             print(
-                f"{model}: recall={metric_value(metrics, 'reconstruction_recall'):.3f} "
+                f"{model}: fact_recall={metric_value(metrics, 'reconstruction_recall'):.3f} "
+                f"fact_accuracy={metric_value(metrics, 'fact_slot_accuracy'):.3f} "
                 f"event_f1={metric_value(metrics, 'event_f1'):.3f} "
                 f"date_precision={metric_value(metrics, 'target_date_precision'):.3f} "
                 f"confuser={metric_value(metrics, 'confuser_intrusion_rate'):.3f} "

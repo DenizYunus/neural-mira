@@ -17,11 +17,26 @@ Run the missing-day reconstruction benchmark on it:
 npm run synthetic:reconstruction
 ```
 
+Run all query modes:
+
+```bash
+npm run synthetic:sweep
+```
+
 Generated files live under `benchmarks/mira_synthetic/generated/` and are
 safe to publish. They contain synthetic diary entries, WhatsApp-style chats,
 photo metadata, corrections, ground-truth event rows, and reconstruction target
 dates. The reconstruction command consumes diary labels, chats, and photo
 metadata as separate source types.
+
+The deterministic corpus currently contains multiple synthetic personas with
+separate diary files and chat folders. Optional DeepSeek draft generation is
+available for future expansion, but generated drafts are review material and are
+ignored by git:
+
+```bash
+python benchmarks/mira_synthetic/generate.py --llm-provider deepseek --deepseek-drafts 5 --deepseek-workers 5
+```
 
 The generated target rows include:
 
@@ -29,8 +44,9 @@ The generated target rows include:
 - `sparse_user_hint` for sparse user-hint queries
 - `confuser_event_ids` for adversarial intrusion scoring
 
-The benchmark's paper-facing score uses `ground_truth/events.jsonl`, not hidden
-diary wording. Hidden diary term overlap is still emitted as a diagnostic.
+The benchmark's paper-facing score uses structured fact slots from
+`ground_truth/events.jsonl`, not hidden diary wording. Hidden diary term overlap
+is still emitted only as a diagnostic.
 
 Design rules:
 

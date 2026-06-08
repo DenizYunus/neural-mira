@@ -90,6 +90,7 @@ evidence. It now reports the first required paper baselines:
 
 - `mira_trust`: scalar MIRA with source-trust weighting
 - `mira_trust_v2`: scalar MIRA retrieval first, trust-calibrated confidence second
+- `mira_trust_v3`: relevance-first retrieval with same-date/source-diversity reranking, then trust-labeled presentation
 - `mira_no_trust`: same scorer with trust weighting disabled
 - `simple_rag_all`: lexical cosine over all allowed memories
 - `diary_only`: MIRA over direct diary memories only
@@ -107,10 +108,12 @@ data/reconstruction_report.md
 data/reconstruction_metrics.json
 ```
 
-When `--ground-truth-events` is supplied, the headline metric is event-level
-reconstruction against gold facts rather than lexical overlap with the hidden
-diary entry. The report also includes target-date precision, contradiction
-preservation, direct diary leakage, audit success, and confuser intrusion.
+When `--ground-truth-events` is supplied, the headline metric is structured
+fact recall against gold event slots rather than lexical overlap with the
+hidden diary entry. The report also includes fact-slot accuracy, event-level
+lexical F1 as a diagnostic, contradiction preservation, direct diary leakage,
+audit success, uncertainty labeling, source-label coverage, and confuser
+intrusion.
 
 ## Public synthetic benchmark
 
@@ -128,6 +131,11 @@ corrections, and hidden target dates. The synthetic reconstruction command
 passes diary labels, chats, and photo metadata into the benchmark, while keeping
 local private reflections out of the public run.
 
+The public corpus is deterministic and multi-persona by default. Optional
+DeepSeek-assisted draft generation can be used to propose new event packs with
+concurrent requests, but those drafts are not part of the tracked benchmark
+until reviewed and converted into deterministic fixtures.
+
 The benchmark supports query modes:
 
 - `date_only`: only the target date is visible.
@@ -138,6 +146,17 @@ The benchmark supports query modes:
 The synthetic corpus also contains adversarial confuser events with similar
 entities or topics. These are scored with `confuser_intrusion_rate` so a model
 is penalized for retrieving the wrong notebook/Berlin/music day.
+
+Run the complete query-mode sweep:
+
+```bash
+npm run synthetic:sweep
+```
+
+This writes ignored local run outputs under
+`benchmarks/mira_synthetic/generated/`, including a combined sweep table. The
+paper-facing comparison should report all four query modes because the task
+gets easier or harder depending on how much public/user hint text is visible.
 
 ## Baseline sweep
 

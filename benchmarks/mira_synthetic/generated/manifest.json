@@ -1,7 +1,13 @@
 {
   "created_at": "2026-01-01T00:00:00Z",
-  "diary_file": "diaries/maya_aydin_2026.md",
-  "event_count": 15,
-  "target_count": 8,
+  "diary_root": "diaries",
+  "event_count": 45,
+  "persona_count": 3,
+  "personas": [
+    "atlas_kaya",
+    "lina_demir",
+    "maya_aydin"
+  ],
+  "target_count": 28,
   "whatsapp_root": "whatsapp"
 }

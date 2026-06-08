@@ -17,6 +17,7 @@ Contents:
 
 The target rows support date-only, public-metadata, and sparse-hint query modes.
 Confuser events are included as adversarial distractors for intrusion scoring.
+Ground-truth event rows include structured fact slots for paper-grade scoring.
 
 Use:
 

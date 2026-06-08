@@ -20,6 +20,9 @@ __pycache__/
 # --- Benchmark run outputs --------------------------------------------------
 benchmarks/mira_synthetic/generated/reconstruction_report*.md
 benchmarks/mira_synthetic/generated/reconstruction_metrics*.json
+benchmarks/mira_synthetic/generated/reconstruction_sweep*.md
+benchmarks/mira_synthetic/generated/reconstruction_sweep*.json
+benchmarks/mira_synthetic/generated/llm_drafts/
 
 # --- Editor / OS noise ------------------------------------------------------
 .DS_Store

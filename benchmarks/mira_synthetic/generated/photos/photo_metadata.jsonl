@@ -1,15 +1,45 @@
-{"caption": "Yellow project schedule on a fridge next to two tea glasses.", "date": "2026-01-01", "location": "home", "people": ["Maya", "Nora"], "photo_id": "photo:2026-01-01"}
-{"caption": "Blurry metro platform sign, wet coat sleeve, guitar case strap.", "date": "2026-01-02", "location": "metro station", "people": ["Maya", "Leo"], "photo_id": "photo:2026-01-02"}
-{"caption": "Laptop with outline headings: trust hierarchy, provenance, reconstruction.", "date": "2026-01-03", "location": "Karga Cafe", "people": ["Maya", "Sara"], "photo_id": "photo:2026-01-03"}
-{"caption": "Workshop invitation email open on a phone, suitcase visible in the corner.", "date": "2026-01-04", "location": "home", "people": ["Maya", "Nora"], "photo_id": "photo:2026-01-04"}
-{"caption": "Clinic waiting number 42 and a wrist brace on Maya's bag.", "date": "2026-01-05", "location": "clinic", "people": ["Maya", "Dr. Irem"], "photo_id": "photo:2026-01-05"}
-{"caption": "Studio headphones, lyric sheet, wrist brace beside the microphone.", "date": "2026-01-06", "location": "small studio", "people": ["Maya", "Leo"], "photo_id": "photo:2026-01-06"}
-{"caption": "Desk with paid bill receipts and a half-empty water glass.", "date": "2026-01-07", "location": "home", "people": ["Maya"], "photo_id": "photo:2026-01-07"}
-{"caption": "Sent email confirmation for Berlin workshop and a handwritten budget.", "date": "2026-01-08", "location": "home", "people": ["Maya", "Sara", "Nora"], "photo_id": "photo:2026-01-08"}
-{"caption": "Phone call screen with Mom, notebook page saying 'not exactly calm'.", "date": "2026-01-09", "location": "phone call", "people": ["Maya", "Mother"], "photo_id": "photo:2026-01-09"}
-{"caption": "Sunset over Moda Park, two coffee cups on a bench.", "date": "2026-01-10", "location": "Moda Park", "people": ["Maya", "Sara"], "photo_id": "photo:2026-01-10"}
-{"caption": "Black notebook with silver sticker inside a canvas studio tote.", "date": "2026-01-11", "location": "bus", "people": ["Maya", "Leo"], "photo_id": "photo:2026-01-11"}
-{"caption": "Draft message with a deleted paragraph highlighted.", "date": "2026-01-12", "location": "home", "people": ["Maya", "Nora"], "photo_id": "photo:2026-01-12"}
-{"caption": "Black notebook open beside archived pages and coffee.", "date": "2026-01-13", "location": "Karga Cafe", "people": ["Maya", "Sara"], "photo_id": "photo:2026-01-13"}
-{"caption": "Berlin budget spreadsheet with travel rows highlighted.", "date": "2026-01-14", "location": "home", "people": ["Maya", "Sara"], "photo_id": "photo:2026-01-14"}
-{"caption": "Studio lyric sheet from a normal vocal practice.", "date": "2026-01-15", "location": "small studio", "people": ["Maya", "Leo"], "photo_id": "photo:2026-01-15"}
+{"caption": "Yellow project schedule on a fridge next to two tea glasses.", "date": "2026-01-01", "location": "home", "people": ["Maya", "Nora"], "persona": "maya_aydin", "photo_id": "photo:2026-01-01"}
+{"caption": "Blurry metro platform sign, wet coat sleeve, guitar case strap.", "date": "2026-01-02", "location": "metro station", "people": ["Maya", "Leo"], "persona": "maya_aydin", "photo_id": "photo:2026-01-02"}
+{"caption": "Laptop with outline headings: trust hierarchy, provenance, reconstruction.", "date": "2026-01-03", "location": "Karga Cafe", "people": ["Maya", "Sara"], "persona": "maya_aydin", "photo_id": "photo:2026-01-03"}
+{"caption": "Workshop invitation email open on a phone, suitcase visible in the corner.", "date": "2026-01-04", "location": "home", "people": ["Maya", "Nora"], "persona": "maya_aydin", "photo_id": "photo:2026-01-04"}
+{"caption": "Clinic waiting number 42 and a wrist brace on Maya's bag.", "date": "2026-01-05", "location": "clinic", "people": ["Maya", "Dr. Irem"], "persona": "maya_aydin", "photo_id": "photo:2026-01-05"}
+{"caption": "Studio headphones, lyric sheet, wrist brace beside the microphone.", "date": "2026-01-06", "location": "small studio", "people": ["Maya", "Leo"], "persona": "maya_aydin", "photo_id": "photo:2026-01-06"}
+{"caption": "Desk with paid bill receipts and a half-empty water glass.", "date": "2026-01-07", "location": "home", "people": ["Maya"], "persona": "maya_aydin", "photo_id": "photo:2026-01-07"}
+{"caption": "Sent email confirmation for Berlin workshop and a handwritten budget.", "date": "2026-01-08", "location": "home", "people": ["Maya", "Sara", "Nora"], "persona": "maya_aydin", "photo_id": "photo:2026-01-08"}
+{"caption": "Phone call screen with Mom, notebook page saying 'not exactly calm'.", "date": "2026-01-09", "location": "phone call", "people": ["Maya", "Mother"], "persona": "maya_aydin", "photo_id": "photo:2026-01-09"}
+{"caption": "Sunset over Moda Park, two coffee cups on a bench.", "date": "2026-01-10", "location": "Moda Park", "people": ["Maya", "Sara"], "persona": "maya_aydin", "photo_id": "photo:2026-01-10"}
+{"caption": "Black notebook with silver sticker inside a canvas studio tote.", "date": "2026-01-11", "location": "bus", "people": ["Maya", "Leo"], "persona": "maya_aydin", "photo_id": "photo:2026-01-11"}
+{"caption": "Draft message with a deleted paragraph highlighted.", "date": "2026-01-12", "location": "home", "people": ["Maya", "Nora"], "persona": "maya_aydin", "photo_id": "photo:2026-01-12"}
+{"caption": "Black notebook open beside archived pages and coffee.", "date": "2026-01-13", "location": "Karga Cafe", "people": ["Maya", "Sara"], "persona": "maya_aydin", "photo_id": "photo:2026-01-13"}
+{"caption": "Berlin budget spreadsheet with travel rows highlighted.", "date": "2026-01-14", "location": "home", "people": ["Maya", "Sara"], "persona": "maya_aydin", "photo_id": "photo:2026-01-14"}
+{"caption": "Studio lyric sheet from a normal vocal practice.", "date": "2026-01-15", "location": "small studio", "people": ["Maya", "Leo"], "persona": "maya_aydin", "photo_id": "photo:2026-01-15"}
+{"caption": "Printed schedule for the urban garden sensor beside a mug and pencil.", "date": "2026-02-01", "location": "home", "people": ["Atlas", "Ece"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-01"}
+{"caption": "Rain on a tram shelter glass panel and a soaked backpack strap.", "date": "2026-02-02", "location": "tram stop", "people": ["Atlas", "Mert"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-02"}
+{"caption": "Laptop outline for the urban garden sensor beside coffee at Halic Lab.", "date": "2026-02-03", "location": "Halic Lab", "people": ["Atlas", "Ece"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-03"}
+{"caption": "Invitation for the Izmir workshop open next to a half-packed tote.", "date": "2026-02-04", "location": "home", "people": ["Atlas", "Selin"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-04"}
+{"caption": "Clinic waiting number and a wrist brace on a canvas bag.", "date": "2026-02-05", "location": "clinic", "people": ["Atlas", "Prof. Hale"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-05"}
+{"caption": "Whiteboard notes for the urban garden sensor at Halic Lab.", "date": "2026-02-06", "location": "Halic Lab", "people": ["Atlas", "Mert"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-06"}
+{"caption": "Paid bill receipts and a cleaned desk.", "date": "2026-02-07", "location": "home", "people": ["Atlas"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-07"}
+{"caption": "Sent acceptance email for the Izmir workshop beside a handwritten budget.", "date": "2026-02-08", "location": "home", "people": ["Atlas", "Ece", "Selin"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-08"}
+{"caption": "Phone call screen and notebook page saying 'not exactly calm'.", "date": "2026-02-09", "location": "phone call", "people": ["Atlas", "Selin"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-09"}
+{"caption": "Sunset over a park bench with two coffee cups.", "date": "2026-02-10", "location": "park", "people": ["Atlas", "Ece"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-10"}
+{"caption": "blue field notebook inside a canvas studio tote.", "date": "2026-02-11", "location": "bus", "people": ["Atlas", "Mert"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-11"}
+{"caption": "Draft boundary message with one paragraph deleted.", "date": "2026-02-12", "location": "home", "people": ["Atlas", "Selin"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-12"}
+{"caption": "blue field notebook open beside archived pages and coffee.", "date": "2026-02-13", "location": "Halic Lab", "people": ["Atlas", "Ece"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-13"}
+{"caption": "Budget spreadsheet for the Izmir workshop with travel rows highlighted.", "date": "2026-02-14", "location": "home", "people": ["Atlas", "Ece"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-14"}
+{"caption": "Routine urban garden sensor notes from a normal practice session.", "date": "2026-02-15", "location": "Halic Lab", "people": ["Atlas", "Mert"], "persona": "atlas_kaya", "photo_id": "photo:2026-02-15"}
+{"caption": "Printed schedule for the documentary edit beside a mug and pencil.", "date": "2026-03-01", "location": "home", "people": ["Lina", "Aylin"], "persona": "lina_demir", "photo_id": "photo:2026-03-01"}
+{"caption": "Rain on a tram shelter glass panel and a soaked backpack strap.", "date": "2026-03-02", "location": "tram stop", "people": ["Lina", "Omar"], "persona": "lina_demir", "photo_id": "photo:2026-03-02"}
+{"caption": "Laptop outline for the documentary edit beside coffee at Pera Studio.", "date": "2026-03-03", "location": "Pera Studio", "people": ["Lina", "Aylin"], "persona": "lina_demir", "photo_id": "photo:2026-03-03"}
+{"caption": "Invitation for the Ankara archive visit open next to a half-packed tote.", "date": "2026-03-04", "location": "home", "people": ["Lina", "Cem"], "persona": "lina_demir", "photo_id": "photo:2026-03-04"}
+{"caption": "Clinic waiting number and a wrist brace on a canvas bag.", "date": "2026-03-05", "location": "clinic", "people": ["Lina", "Dr. Rafi"], "persona": "lina_demir", "photo_id": "photo:2026-03-05"}
+{"caption": "Whiteboard notes for the documentary edit at Pera Studio.", "date": "2026-03-06", "location": "Pera Studio", "people": ["Lina", "Omar"], "persona": "lina_demir", "photo_id": "photo:2026-03-06"}
+{"caption": "Paid bill receipts and a cleaned desk.", "date": "2026-03-07", "location": "home", "people": ["Lina"], "persona": "lina_demir", "photo_id": "photo:2026-03-07"}
+{"caption": "Sent acceptance email for the Ankara archive visit beside a handwritten budget.", "date": "2026-03-08", "location": "home", "people": ["Lina", "Aylin", "Cem"], "persona": "lina_demir", "photo_id": "photo:2026-03-08"}
+{"caption": "Phone call screen and notebook page saying 'not exactly calm'.", "date": "2026-03-09", "location": "phone call", "people": ["Lina", "Cem"], "persona": "lina_demir", "photo_id": "photo:2026-03-09"}
+{"caption": "Sunset over a park bench with two coffee cups.", "date": "2026-03-10", "location": "park", "people": ["Lina", "Aylin"], "persona": "lina_demir", "photo_id": "photo:2026-03-10"}
+{"caption": "silver audio recorder inside a canvas studio tote.", "date": "2026-03-11", "location": "bus", "people": ["Lina", "Omar"], "persona": "lina_demir", "photo_id": "photo:2026-03-11"}
+{"caption": "Draft boundary message with one paragraph deleted.", "date": "2026-03-12", "location": "home", "people": ["Lina", "Cem"], "persona": "lina_demir", "photo_id": "photo:2026-03-12"}
+{"caption": "silver audio recorder open beside archived pages and coffee.", "date": "2026-03-13", "location": "Pera Studio", "people": ["Lina", "Aylin"], "persona": "lina_demir", "photo_id": "photo:2026-03-13"}
+{"caption": "Budget spreadsheet for the Ankara archive visit with travel rows highlighted.", "date": "2026-03-14", "location": "home", "people": ["Lina", "Aylin"], "persona": "lina_demir", "photo_id": "photo:2026-03-14"}
+{"caption": "Routine documentary edit notes from a normal practice session.", "date": "2026-03-15", "location": "Pera Studio", "people": ["Lina", "Omar"], "persona": "lina_demir", "photo_id": "photo:2026-03-15"}
